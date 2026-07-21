@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced AutoML with feature selection and stacking.
+AutoML training for AAP competition sandbox.
+Ensemble of RF/ExtraTrees/XGBoost/LightGBM/CatBoost.
 """
 
 import pandas as pd, numpy as np
@@ -15,7 +16,7 @@ cat_cols = [c for c in train.columns if train[c].dtype == 'object' and c.startsw
 y = train['target'].values
 X_train = train.drop(columns=['row_id', 'target']); X_test = test.drop(columns=['row_id'])
 
-# Missing imputation
+# Impute missing
 for col in X_train.columns:
     if X_train[col].dtype == 'object':
         X_train[col] = X_train[col].fillna('missing')
@@ -24,7 +25,7 @@ for col in X_train.columns:
         X_train[col] = X_train[col].fillna(X_train[col].median())
         X_test[col] = X_test[col].fillna(X_train[col].median())
 
-# Encode
+# Encode categoricals
 for col in cat_cols:
     le = LabelEncoder()
     le.fit(pd.concat([X_train[col], X_test[col]]).astype(str))
@@ -33,36 +34,23 @@ for col in cat_cols:
 
 n_samples = len(train)
 n_folds = 3 if n_samples < 2000 else 5
-
-# Quick feature importance to select top features
-rf_base = RandomForestClassifier(n_estimators=100, max_depth=6, random_state=42, n_jobs=-1)
-rf_base.fit(X_train, y)
-importances = pd.DataFrame({'feature': X_train.columns, 'importance': rf_base.feature_importances_})
-top_features = importances.nlargest(12, 'importance')['feature'].tolist()  # Use top 12 features
-
-print(f"Top features: {top_features}")
-
-# Train on reduced feature set
-X_reduced = X_train[top_features]
-X_test_reduced = X_test[top_features]
-
 predictions = []
 
-# RF on selected features
+# RF
 rf = RandomForestClassifier(n_estimators=300, max_depth=8, min_samples_split=10, random_state=42, n_jobs=-1)
-oof = np.zeros(len(X_reduced))
-for tr_idx, val_idx in StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42).split(X_reduced, y):
-    rf.fit(X_reduced.iloc[tr_idx], y[tr_idx]); oof[val_idx] = rf.predict_proba(X_reduced.iloc[val_idx])[:, 1]
-print(f"rf_selected: CV={roc_auc_score(y, oof):.4f}")
-rf.fit(X_reduced, y); predictions.append(rf.predict_proba(X_test_reduced)[:, 1])
-
-# Full feature RF
-rf_full = RandomForestClassifier(n_estimators=300, max_depth=8, random_state=42, n_jobs=-1)
 oof = np.zeros(len(X_train))
 for tr_idx, val_idx in StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42).split(X_train, y):
-    rf_full.fit(X_train.iloc[tr_idx], y[tr_idx]); oof[val_idx] = rf_full.predict_proba(X_train.iloc[val_idx])[:, 1]
-print(f"rf_full: CV={roc_auc_score(y, oof):.4f}")
-rf_full.fit(X_train, y); predictions.append(rf_full.predict_proba(X_test)[:, 1])
+    rf.fit(X_train.iloc[tr_idx], y[tr_idx]); oof[val_idx] = rf.predict_proba(X_train.iloc[val_idx])[:, 1]
+print(f"rf: CV={roc_auc_score(y, oof):.4f}")
+rf.fit(X_train, y); predictions.append(rf.predict_proba(X_test)[:, 1])
+
+# ExtraTrees
+et = ExtraTreesClassifier(n_estimators=200, max_depth=10, random_state=42, n_jobs=-1)
+oof = np.zeros(len(X_train))
+for tr_idx, val_idx in StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42).split(X_train, y):
+    et.fit(X_train.iloc[tr_idx], y[tr_idx]); oof[val_idx] = et.predict_proba(X_train.iloc[val_idx])[:, 1]
+print(f"et: CV={roc_auc_score(y, oof):.4f}")
+et.fit(X_train, y); predictions.append(et.predict_proba(X_test)[:, 1])
 
 # XGBoost
 try:
@@ -99,14 +87,8 @@ if cat_cols:
         cb.fit(X_train, y); predictions.append(cb.predict_proba(X_test)[:, 1])
     except: pass
 
-# Weighted ensemble
-if len(predictions) > 1:
-    # Weight by inverse variance of predictions (diversity weighting)
-    weights = [1.0/predictions[i].var() for i in range(len(predictions))]
-    weights = [w/sum(weights) for w in weights]
-    ensemble = np.average(predictions, axis=0, weights=weights)
-else:
-    ensemble = predictions[0]
-
-pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-print(f"Saved final_submission.csv ({len(predictions)} models)")
+# Ensemble
+if predictions:
+    ensemble = np.mean(predictions, axis=0)
+    pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
+    print(f"Saved final_submission.csv ({len(predictions)} models)")

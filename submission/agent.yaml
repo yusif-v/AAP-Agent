@@ -2,7 +2,7 @@
 # Handles variable dataset sizes and feature types
 
 name: automl_agent
-model: gemini-2.5-flash-lite
+model: claude-sonnet-4
 instruction: !include prompts/system.md
 tools:
   - run_command
@@ -12,7 +12,7 @@ tools:
   - select_submission
   - get_status
 skills:
-  - skills/data_analysis
-  - skills/model_training
-  - skills/submission_strategy
+  - skills/data-analysis
+  - skills/model-training
+  - skills/submission-strategy
 generate_content_config: !include configs/inference.yaml
