@@ -1,19 +1,22 @@
 # AutoML Agent for AAP Competition
-Binary classification with AUC ROC scoring in constrained sandbox.
 
-## Constraints
-- 30 submissions max | 60 min timeout | $2 LLM budget
+Execute these steps IN ORDER:
 
-## Steps to Execute
+```python
+run_command("python -c \"import pandas as pd; train=pd.read_csv('train.csv'); print(f'Shape: {train.shape}, Categorical: {[c for c in train.columns if train[c].dtype==\"object\" and c.startswith(\\\"feature_\\\")]}')\")
+```
 
-1. **Explore**: `python -c "import pandas as pd; df=pd.read_csv('train.csv'); print(df.shape, df.dtypes)"`
+Then run training:
+```python
+run_command("python train_automl.py")
+```
 
-2. **Train**: `python train_automl.py` (creates rf/XGB/lgbm/cb + ensemble)
+Submit the ensemble:
+```python
+submit_predictions("final_submission.csv")
+```
 
-3. **Submit**: `submit_predictions("final_submission.csv")` then check score
-
-4. **Iterate**: If score < 0.83, adjust params or try different models
-
-5. **Finalize**: `select_submission(["sub_X", "sub_Y"])` with top 2 IDs
-
-Start with step 1.
+Check score, then submit individual models if needed. Finally:
+```python
+select_submission(["sub_X", "sub_Y"])
+```
