@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Data
+data/autonomous-agent-prediction-beta.zip
+data/output/
+data/data/train_*/*submission.csv
+data/data/train_*/train_models.py
+data/data/train_*/train_automl.py
+
+# Credentials
+.env
+.env.local
+
+# Models
+*.h5
+*.pkl
+*.joblib
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
