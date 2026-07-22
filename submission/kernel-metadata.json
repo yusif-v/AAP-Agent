@@ -1,0 +1,19 @@
+{
+    "kickstart": {
+        "type": "other",
+        "language": "python"
+    },
+    "metadata": {
+        "title": "AAP-Agent: Autonomous ML Agent",
+        "id": "yusifovtelman/aap-agent",
+        "author": "yusifovtelman",
+        "description": "Autonomous AI agent for Kaggle's Autonomous Agent Prediction competition. Uses target encoding, feature interactions, and stacking ensemble to achieve >0.83 AUC.",
+        "license": "MIT",
+        "is_competition": true,
+        "competition": {
+            "handle": "autonomous-agent-prediction-beta"
+        },
+        "tags": ["autonomous-agent", "automl", "ensemble", "stacking"],
+        "category": "research"
+    }
+}
