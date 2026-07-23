@@ -1,0 +1,24 @@
+[{"stream_name":"stdout","time":3.856640443,"data":"Loading competition data...\n"}
+,{"stream_name":"stdout","time":3.8570052710000002,"data":"Data not found, trying to download...\n"}
+,{"stream_name":"stdout","time":3.857015228,"data":"Attempting to download competition data...\n"}
+,{"stream_name":"stdout","time":5.557595809,"data":"Warning: Looks like you're using an outdated `kaggle` version (installed: 2.0.2), please consider upgrading to the latest version (2.2.2)\n"}
+,{"stream_name":"stdout","time":5.558058779,"data":"Downloading...\n"}
+,{"stream_name":"stdout","time":6.645411543,"data":"Downloading autonomous-agent-prediction-beta.zip to .\n"}
+,{"stream_name":"stdout","time":8.581953476,"data":"\n"}
+,{"stream_name":"stderr","time":8.581956553,"data":"\r  0%|          | 0.00/34.5M [00:00\u003c?, ?B/s]\r  3%|▎         | 1.00M/34.5M [00:00\u003c00:23, 1.48MB/s]\r  6%|▌         | 2.00M/34.5M [00:00\u003c00:11, 2.88MB/s]\r 12%|█▏        | 4.00M/34.5M [00:00\u003c00:05, 6.04MB/s]\r 23%|██▎       | 8.00M/34.5M [00:01\u003c00:02, 12.7MB/s]\r 35%|███▍      | 12.0M/34.5M [00:01\u003c00:01, 17.9MB/s]\r 46%|████▋     | 16.0M/34.5M [00:01\u003c00:00, 21.8MB/s]\r 58%|█████▊    | 20.0M/34.5M [00:01\u003c00:00, 24.7MB/s]\r 70%|██████▉   | 24.0M/34.5M [00:01\u003c00:00, 27.0MB/s]\r 81%|████████  | 28.0M/34.5M [00:01\u003c00:00, 28.7MB/s]\r 93%|█████████▎| 32.0M/34.5M [00:01\u003c00:00, 30.4MB/s]\r100%|██████████| 34.5M/34.5M [00:01\u003c00:00, 18.7MB/s]\n"}
+,{"stream_name":"stdout","time":8.583014488,"data":"Unzipping autonomous-agent-prediction-beta.zip...\n"}
+,{"stream_name":"stdout","time":9.111511271,"data":"Loading data from: data/train_05\n"}
+,{"stream_name":"stdout","time":9.137266025,"data":"Loaded train shape: (1060, 11), test shape: (10000, 10)\n"}
+,{"stream_name":"stdout","time":11.698941603,"data":"rf: CV=0.6524 (+/- 0.0039)\n"}
+,{"stream_name":"stdout","time":13.474307879,"data":"et: CV=0.6736 (+/- 0.0121)\n"}
+,{"stream_name":"stdout","time":14.362486033,"data":"xgb: CV=0.6337 (+/- 0.0071)\n"}
+,{"stream_name":"stdout","time":36.139656526,"data":"lgbm: CV=0.6307 (+/- 0.0029)\n"}
+,{"stream_name":"stdout","time":38.369523797,"data":"gb: CV=0.6366 (+/- 0.0128)\n"}
+,{"stream_name":"stdout","time":41.995903259,"data":"Saved final_submission.csv (stacking blend)\n"}
+,{"stream_name":"stderr","time":44.862608004,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":44.8626399,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":45.082490559,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":45.082516364,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":45.721065679,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":46.939307173,"data":"[NbConvertApp] Writing 336954 bytes to __results__.html\n"}
+]

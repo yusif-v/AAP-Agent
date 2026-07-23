@@ -1,0 +1,12 @@
+[{"stream_name":"stderr","time":1.4375199269999999,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":1.437575029,"data":"  File \"/kaggle/src/script.py\", line 15, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":1.437582685,"data":"    with open(script_path, 'r') as f:\n"}
+,{"stream_name":"stderr","time":1.437586851,"data":"         ^^^^^^^^^^^^^^^^^^^^^^\n"}
+,{"stream_name":"stderr","time":1.437676443,"data":"FileNotFoundError: [Errno 2] No such file or directory: '/kaggle/src/skills/model_training/scripts/train_automl.py'\n"}
+,{"stream_name":"stderr","time":4.4915067650000005,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":4.491563049,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":5.049633736,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":5.049673499,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":7.409374556,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":9.099102347,"data":"[NbConvertApp] Writing 275292 bytes to __results__.html\n"}
+]
