@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
-"""
-Entry point for Kaggle AAP Agent submission.
+"""Entry point for Kaggle AAP Agent submission.
 This script runs the autonomous agent in the Kaggle sandbox.
 """
 
 import sys
 import os
-import time
 import glob
 import pandas as pd
 import numpy as np
 import warnings
 import itertools
-import subprocess
-import zipfile
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, cross_val_predict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
@@ -23,63 +19,41 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
-def download_competition_data():
-    """Download competition data from Kaggle if not available locally."""
-    print("Downloading competition data...")
-    
-    # Try using kaggle CLI to download the data
-    try:
-        # Create data directory
-        os.makedirs('data', exist_ok=True)
-        
-        # Download competition data
-        result = subprocess.run(
-            ['kaggle', 'competitions', 'download', '-c', 'autonomous-agent-prediction-beta', '-p', 'data'],
-            capture_output=True,
-            text=True,
-            timeout=180
-        )
-        
-        if result.returncode == 0:
-            print("Downloaded competition data successfully")
-            # Find and unzip the zip file
-            zip_files = glob.glob('data/*.zip')
-            for zip_file in zip_files:
-                print(f"Unzipping {zip_file}...")
-                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                    zip_ref.extractall('data')
-                os.remove(zip_file)
-            return True
-        else:
-            print(f"Download failed: {result.stderr}")
-            return False
-    except Exception as e:
-        print(f"Error downloading data: {e}")
-        return False
-
-
 def find_and_load_data():
-    """Find and load competition data files, handling multi-split structure."""
-    # First check if files exist in current directory
-    if os.path.exists('train.csv') and os.path.exists('test.csv'):
-        print("Loading data from current directory")
-        return pd.read_csv('train.csv'), pd.read_csv('test.csv')
+    """Find and load competition data files, handling multiple possible locations."""
+    # List of possible data locations to check
+    possible_paths = [
+        # Current directory
+        ('./train.csv', './test.csv'),
+        # Kaggle competition input path
+        ('/kaggle/input/autonomous-agent-prediction-beta/train.csv', '/kaggle/input/autonomous-agent-prediction-beta/test.csv'),
+        # Data split directories
+        ('./data/train_01/train.csv', './data/train_01/test.csv'),
+        ('./data/train/train.csv', './data/train/test.csv'),
+    ]
     
-    # Check for data in subdirectories (Kaggle competition data location)
+    # Also check for data files in various locations
     train_files = glob.glob('**/train.csv', recursive=True)
     test_files = glob.glob('**/test.csv', recursive=True)
     
+    # Try to match train and test files from the same directory
     if train_files and test_files:
-        # Use the first found split (train_01 typically)
-        train_df = pd.read_csv(train_files[0])
-        test_df = pd.read_csv(test_files[0])
-        print(f"Loaded data from: {os.path.dirname(train_files[0])}")
-        return train_df, test_df
+        for train_file in train_files:
+            train_dir = os.path.dirname(train_file)
+            test_file = os.path.join(train_dir, 'test.csv')
+            if test_file in test_files:
+                print(f"Loaded data from: {train_dir}")
+                return pd.read_csv(train_file), pd.read_csv(test_file)
     
-    # Check for data in data/train_XX pattern
+    # Check specific paths
+    for train_path, test_path in possible_paths:
+        if os.path.exists(train_path) and os.path.exists(test_path):
+            print(f"Loaded data from: {os.path.dirname(train_path)}")
+            return pd.read_csv(train_path), pd.read_csv(test_path)
+    
+    # Check data/train_* pattern
     data_dirs = glob.glob('data/train_*')
     if data_dirs:
-        # Use the first available split
         first_dir = data_dirs[0]
         train_path = os.path.join(first_dir, 'train.csv')
         test_path = os.path.join(first_dir, 'test.csv')
@@ -87,18 +61,11 @@ def find_and_load_data():
             print(f"Loaded data from: {first_dir}")
             return pd.read_csv(train_path), pd.read_csv(test_path)
     
-    # Try to download the data
-    print("Data not found locally, attempting to download...")
-    if download_competition_data():
-        # Check again after download
-        data_dirs = glob.glob('data/train_*')
-        if data_dirs:
-            first_dir = data_dirs[0]
-            train_path = os.path.join(first_dir, 'train.csv')
-            test_path = os.path.join(first_dir, 'test.csv')
-            if os.path.exists(train_path) and os.path.exists(test_path):
-                print(f"Loaded data from: {first_dir}")
-                return pd.read_csv(train_path), pd.read_csv(test_path)
+    # Debug: print what we found
+    print("DEBUG: Checking data locations...")
+    print(f"Files in current directory: {os.listdir('.')}")
+    print(f"Train files found: {train_files}")
+    print(f"Test files found: {test_files}")
     
     return None, None
 
@@ -117,10 +84,7 @@ def main():
     train, test = find_and_load_data()
     
     if train is None or test is None:
-        print("ERROR: Data files not found")
-        print(f"Files in current directory: {os.listdir('.')}")
-        csv_files = glob.glob('**/*.csv', recursive=True)
-        print(f"CSV files found: {csv_files}")
+        print("ERROR: Data files not found in any expected location")
         sys.exit(1)
     
     print(f"Loaded train shape: {train.shape}, test shape: {test.shape}")
@@ -190,7 +154,7 @@ def main():
         
         if name == 'rf':
             return RandomForestClassifier(n_estimators=n_est, max_depth=6, min_samples_split=5, 
-                                       random_state=42, n_jobs=-1)
+                                           random_state=42, n_jobs=-1)
         if name == 'et':
             return ExtraTreesClassifier(n_estimators=n_est, max_depth=8, random_state=42, n_jobs=-1)
         if name == 'xgb':
