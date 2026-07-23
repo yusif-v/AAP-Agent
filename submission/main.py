@@ -6,15 +6,12 @@ This script runs the autonomous agent in the Kaggle sandbox.
 
 import sys
 import os
-import time
 import glob
 import pandas as pd
 import numpy as np
 import warnings
 import itertools
-import subprocess
 import zipfile
-import json
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, cross_val_predict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
@@ -24,76 +21,43 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
-def check_kaggle_auth():
-    """Check if Kaggle API is properly authenticated."""
-    # Check for KAGGLE_API_TOKEN (BearerAuth - required for writes)
-    if 'KAGGLE_API_TOKEN' in os.environ:
-        print("Kaggle API token found in environment")
-        return True
-    
-    # Check for kaggle.json (BasicAuth - for reads)
-    kaggle_json_path = os.path.expanduser('~/.kaggle/kaggle.json')
-    if os.path.exists(kaggle_json_path):
-        print(f"Kaggle credentials found at {kaggle_json_path}")
-        return True
-    
-    print("No Kaggle authentication found")
-    return False
-
-
 def download_competition_data():
-    """Download competition data from Kaggle if not available locally."""
-    print("Downloading competition data...")
+    """Download competition data from Kaggle using Python API."""
+    print("Downloading competition data using Kaggle API...")
     
-    # Check authentication first
-    if not check_kaggle_auth():
-        print("ERROR: Kaggle authentication not found")
-        return False
-    
-    # Try using kaggle CLI to download the data
     try:
+        import kaggle
+        
         # Create data directory
         os.makedirs('data', exist_ok=True)
         
-        # Download competition data
-        print("Running: kaggle competitions download -c autonomous-agent-prediction-beta -p data")
-        result = subprocess.run(
-            ['kaggle', 'competitions', 'download', '-c', 'autonomous-agent-prediction-beta', '-p', 'data'],
-            capture_output=True,
-            text=True,
-            timeout=300
+        # Download competition data using Python API
+        # This works in Kaggle kernels with competition_sources
+        kaggle.api.competition_download_files(
+            'autonomous-agent-prediction-beta',
+            path='data',
+            force=True,
+            quiet=False
         )
         
-        print(f"Download return code: {result.returncode}")
-        if result.stdout:
-            print(f"Download stdout: {result.stdout}")
-        if result.stderr:
-            print(f"Download stderr: {result.stderr}")
+        print("Download completed successfully")
         
-        if result.returncode == 0:
-            print("Downloaded competition data successfully")
-            # Find and unzip the zip file
-            zip_files = glob.glob('data/*.zip')
-            print(f"Found zip files: {zip_files}")
-            for zip_file in zip_files:
-                print(f"Unzipping {zip_file}...")
-                try:
-                    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                        zip_ref.extractall('data')
-                    os.remove(zip_file)
-                except Exception as e:
-                    print(f"Error unzipping: {e}")
-            
-            # List what was downloaded
-            data_contents = glob.glob('data/**/*', recursive=True)
-            print(f"Data directory contents: {data_contents[:20]}...")  # Show first 20 items
-            return True
-        else:
-            print(f"Download failed with return code {result.returncode}")
-            return False
-    except subprocess.TimeoutExpired:
-        print("Download timed out after 300 seconds")
-        return False
+        # Find and unzip the zip file
+        zip_files = glob.glob('data/*.zip')
+        print(f"Found zip files: {zip_files}")
+        for zip_file in zip_files:
+            print(f"Unzipping {zip_file}...")
+            try:
+                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                    zip_ref.extractall('data')
+                os.remove(zip_file)
+            except Exception as e:
+                print(f"Error unzipping: {e}")
+        
+        # List what was downloaded
+        data_contents = glob.glob('data/**/*', recursive=True)
+        print(f"Data directory contents (first 20): {data_contents[:20]}")
+        return True
     except Exception as e:
         print(f"Error downloading data: {e}")
         import traceback
@@ -130,7 +94,7 @@ def find_and_load_data():
             print(f"Loaded data from: {first_dir}")
             return pd.read_csv(train_path), pd.read_csv(test_path)
     
-    # Try to download the data
+    # Try to download the data using Kaggle API
     print("Data not found locally, attempting to download...")
     if download_competition_data():
         # Check again after download
