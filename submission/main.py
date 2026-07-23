@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Entry point for Kaggle AAP Agent submission.
+"""
+Entry point for Kaggle AAP Agent submission.
 This script runs the autonomous agent in the Kaggle sandbox.
 """
 
 import sys
 import os
+import time
 import glob
 import pandas as pd
 import numpy as np
 import warnings
 import itertools
+import subprocess
+import zipfile
+import json
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, cross_val_predict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
@@ -19,41 +24,105 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
-def find_and_load_data():
-    """Find and load competition data files, handling multiple possible locations."""
-    # List of possible data locations to check
-    possible_paths = [
-        # Current directory
-        ('./train.csv', './test.csv'),
-        # Kaggle competition input path
-        ('/kaggle/input/autonomous-agent-prediction-beta/train.csv', '/kaggle/input/autonomous-agent-prediction-beta/test.csv'),
-        # Data split directories
-        ('./data/train_01/train.csv', './data/train_01/test.csv'),
-        ('./data/train/train.csv', './data/train/test.csv'),
-    ]
+def check_kaggle_auth():
+    """Check if Kaggle API is properly authenticated."""
+    # Check for KAGGLE_API_TOKEN (BearerAuth - required for writes)
+    if 'KAGGLE_API_TOKEN' in os.environ:
+        print("Kaggle API token found in environment")
+        return True
     
-    # Also check for data files in various locations
+    # Check for kaggle.json (BasicAuth - for reads)
+    kaggle_json_path = os.path.expanduser('~/.kaggle/kaggle.json')
+    if os.path.exists(kaggle_json_path):
+        print(f"Kaggle credentials found at {kaggle_json_path}")
+        return True
+    
+    print("No Kaggle authentication found")
+    return False
+
+
+def download_competition_data():
+    """Download competition data from Kaggle if not available locally."""
+    print("Downloading competition data...")
+    
+    # Check authentication first
+    if not check_kaggle_auth():
+        print("ERROR: Kaggle authentication not found")
+        return False
+    
+    # Try using kaggle CLI to download the data
+    try:
+        # Create data directory
+        os.makedirs('data', exist_ok=True)
+        
+        # Download competition data
+        print("Running: kaggle competitions download -c autonomous-agent-prediction-beta -p data")
+        result = subprocess.run(
+            ['kaggle', 'competitions', 'download', '-c', 'autonomous-agent-prediction-beta', '-p', 'data'],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        
+        print(f"Download return code: {result.returncode}")
+        if result.stdout:
+            print(f"Download stdout: {result.stdout}")
+        if result.stderr:
+            print(f"Download stderr: {result.stderr}")
+        
+        if result.returncode == 0:
+            print("Downloaded competition data successfully")
+            # Find and unzip the zip file
+            zip_files = glob.glob('data/*.zip')
+            print(f"Found zip files: {zip_files}")
+            for zip_file in zip_files:
+                print(f"Unzipping {zip_file}...")
+                try:
+                    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                        zip_ref.extractall('data')
+                    os.remove(zip_file)
+                except Exception as e:
+                    print(f"Error unzipping: {e}")
+            
+            # List what was downloaded
+            data_contents = glob.glob('data/**/*', recursive=True)
+            print(f"Data directory contents: {data_contents[:20]}...")  # Show first 20 items
+            return True
+        else:
+            print(f"Download failed with return code {result.returncode}")
+            return False
+    except subprocess.TimeoutExpired:
+        print("Download timed out after 300 seconds")
+        return False
+    except Exception as e:
+        print(f"Error downloading data: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def find_and_load_data():
+    """Find and load competition data files, handling multi-split structure."""
+    # First check if files exist in current directory
+    if os.path.exists('train.csv') and os.path.exists('test.csv'):
+        print("Loading data from current directory")
+        return pd.read_csv('train.csv'), pd.read_csv('test.csv')
+    
+    # Check for data in subdirectories (Kaggle competition data location)
     train_files = glob.glob('**/train.csv', recursive=True)
     test_files = glob.glob('**/test.csv', recursive=True)
     
-    # Try to match train and test files from the same directory
     if train_files and test_files:
-        for train_file in train_files:
-            train_dir = os.path.dirname(train_file)
-            test_file = os.path.join(train_dir, 'test.csv')
-            if test_file in test_files:
-                print(f"Loaded data from: {train_dir}")
-                return pd.read_csv(train_file), pd.read_csv(test_file)
+        # Use the first found split (train_01 typically)
+        train_df = pd.read_csv(train_files[0])
+        test_df = pd.read_csv(test_files[0])
+        print(f"Loaded data from: {os.path.dirname(train_files[0])}")
+        return train_df, test_df
     
-    # Check specific paths
-    for train_path, test_path in possible_paths:
-        if os.path.exists(train_path) and os.path.exists(test_path):
-            print(f"Loaded data from: {os.path.dirname(train_path)}")
-            return pd.read_csv(train_path), pd.read_csv(test_path)
-    
-    # Check data/train_* pattern
+    # Check for data in data/train_XX pattern
     data_dirs = glob.glob('data/train_*')
     if data_dirs:
+        # Use the first available split
         first_dir = data_dirs[0]
         train_path = os.path.join(first_dir, 'train.csv')
         test_path = os.path.join(first_dir, 'test.csv')
@@ -61,11 +130,26 @@ def find_and_load_data():
             print(f"Loaded data from: {first_dir}")
             return pd.read_csv(train_path), pd.read_csv(test_path)
     
-    # Debug: print what we found
-    print("DEBUG: Checking data locations...")
-    print(f"Files in current directory: {os.listdir('.')}")
-    print(f"Train files found: {train_files}")
-    print(f"Test files found: {test_files}")
+    # Try to download the data
+    print("Data not found locally, attempting to download...")
+    if download_competition_data():
+        # Check again after download
+        data_dirs = glob.glob('data/train_*')
+        print(f"Data dirs after download: {data_dirs}")
+        if data_dirs:
+            first_dir = data_dirs[0]
+            train_path = os.path.join(first_dir, 'train.csv')
+            test_path = os.path.join(first_dir, 'test.csv')
+            if os.path.exists(train_path) and os.path.exists(test_path):
+                print(f"Loaded data from: {first_dir}")
+                return pd.read_csv(train_path), pd.read_csv(test_path)
+        
+        # Try alternative patterns
+        train_files = glob.glob('data/*/train.csv', recursive=True)
+        test_files = glob.glob('data/*/test.csv', recursive=True)
+        if train_files and test_files:
+            print(f"Loaded data from subdirectories")
+            return pd.read_csv(train_files[0]), pd.read_csv(test_files[0])
     
     return None, None
 
@@ -84,7 +168,10 @@ def main():
     train, test = find_and_load_data()
     
     if train is None or test is None:
-        print("ERROR: Data files not found in any expected location")
+        print("ERROR: Data files not found")
+        print(f"Files in current directory: {os.listdir('.')}")
+        csv_files = glob.glob('**/*.csv', recursive=True)
+        print(f"CSV files found: {csv_files}")
         sys.exit(1)
     
     print(f"Loaded train shape: {train.shape}, test shape: {test.shape}")
@@ -154,7 +241,7 @@ def main():
         
         if name == 'rf':
             return RandomForestClassifier(n_estimators=n_est, max_depth=6, min_samples_split=5, 
-                                           random_state=42, n_jobs=-1)
+                                       random_state=42, n_jobs=-1)
         if name == 'et':
             return ExtraTreesClassifier(n_estimators=n_est, max_depth=8, random_state=42, n_jobs=-1)
         if name == 'xgb':
