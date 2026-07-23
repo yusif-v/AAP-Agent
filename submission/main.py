@@ -21,37 +21,59 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
-def find_competition_data_mount():
-    """Find competition data mounted at /kaggle/input/<competition-name>/"""
-    input_dir = '/kaggle/input'
+def load_data():
+    """Load competition data from various sources."""
+    # Method 1: Check for mounted competition data at /kaggle/input/
+    input_dir = '/kaggle/input/autonomous-agent-prediction-beta'
     if os.path.exists(input_dir):
-        # Look for competition data directories
-        for item in os.listdir(input_dir):
-            item_path = os.path.join(input_dir, item)
-            if os.path.isdir(item_path):
-                # Check for train.csv and test.csv
-                train_path = os.path.join(item_path, 'train.csv')
-                test_path = os.path.join(item_path, 'test.csv')
-                if os.path.exists(train_path) and os.path.exists(test_path):
-                    print(f"Found competition data mounted at: {item_path}")
-                    return pd.read_csv(train_path), pd.read_csv(test_path)
-                
-                # Check for multi-split data (train_01, train_02, etc.)
-                data_dirs = glob.glob(os.path.join(item_path, 'train_*'))
-                if data_dirs:
-                    first_dir = data_dirs[0]
-                    train_path = os.path.join(first_dir, 'train.csv')
-                    test_path = os.path.join(first_dir, 'test.csv')
-                    if os.path.exists(train_path) and os.path.exists(test_path):
-                        print(f"Found multi-split data at: {first_dir}")
-                        return pd.read_csv(train_path), pd.read_csv(test_path)
+        print(f"Found mounted data at: {input_dir}")
+        # Check for train.csv directly
+        train_path = os.path.join(input_dir, 'train.csv')
+        test_path = os.path.join(input_dir, 'test.csv')
+        if os.path.exists(train_path) and os.path.exists(test_path):
+            print("Loading data from mounted location")
+            return pd.read_csv(train_path), pd.read_csv(test_path)
+        
+        # Check for multi-split structure
+        data_dirs = glob.glob(os.path.join(input_dir, 'train_*'))
+        if data_dirs:
+            print(f"Found multi-split data: {data_dirs[:3]}...")
+            # Use first split
+            first_dir = data_dirs[0]
+            train_path = os.path.join(first_dir, 'train.csv')
+            test_path = os.path.join(first_dir, 'test.csv')
+            if os.path.exists(train_path) and os.path.exists(test_path):
+                print(f"Loading data from: {first_dir}")
+                return pd.read_csv(train_path), pd.read_csv(test_path)
+    
+    # Method 2: Check current directory
+    if os.path.exists('train.csv') and os.path.exists('test.csv'):
+        print("Loading data from current directory")
+        return pd.read_csv('train.csv'), pd.read_csv('test.csv')
+    
+    # Method 3: Check data/train_XX pattern
+    data_dirs = glob.glob('data/train_*')
+    if data_dirs:
+        first_dir = data_dirs[0]
+        train_path = os.path.join(first_dir, 'train.csv')
+        test_path = os.path.join(first_dir, 'test.csv')
+        if os.path.exists(train_path) and os.path.exists(test_path):
+            print(f"Loading data from: {first_dir}")
+            return pd.read_csv(train_path), pd.read_csv(test_path)
+    
+    # Method 4: Search recursively
+    train_files = glob.glob('**/train.csv', recursive=True)
+    test_files = glob.glob('**/test.csv', recursive=True)
+    if train_files and test_files:
+        print(f"Found data via recursive search")
+        return pd.read_csv(train_files[0]), pd.read_csv(test_files[0])
     
     return None, None
 
 
-def download_competition_data():
-    """Download competition data from Kaggle using Python API."""
-    print("Downloading competition data using Kaggle API...")
+def download_data():
+    """Download competition data using Kaggle API."""
+    print("Attempting to download competition data...")
     
     try:
         import kaggle
@@ -59,118 +81,54 @@ def download_competition_data():
         # Create data directory
         os.makedirs('data', exist_ok=True)
         
-        # Download competition data using Python API
-        # This works in Kaggle kernels with competition_sources
+        # Download competition data
+        print("Downloading...")
         kaggle.api.competition_download_files(
             'autonomous-agent-prediction-beta',
-            path='data',
+            path='.',
             force=True,
             quiet=False
         )
         
-        print("Download completed successfully")
+        # Find and unzip
+        zip_files = glob.glob('*.zip')
+        for zf in zip_files:
+            print(f"Unzipping {zf}...")
+            with zipfile.ZipFile(zf, 'r') as zip_ref:
+                zip_ref.extractall('.')
+            os.remove(zf)
         
-        # Find and unzip the zip file
-        zip_files = glob.glob('data/*.zip')
-        print(f"Found zip files: {zip_files}")
-        for zip_file in zip_files:
-            print(f"Unzipping {zip_file}...")
-            try:
-                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-                    zip_ref.extractall('data')
-                os.remove(zip_file)
-            except Exception as e:
-                print(f"Error unzipping: {e}")
-        
-        # List what was downloaded
-        data_contents = glob.glob('data/**/*', recursive=True)
-        print(f"Data directory contents (first 20): {data_contents[:20]}")
         return True
     except Exception as e:
-        print(f"Error downloading data: {e}")
+        print(f"Download failed: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 
-def find_and_load_data():
-    """Find and load competition data files, handling multi-split structure."""
-    # First check for mounted competition data (Kaggle provides this for competition kernels)
-    print("Checking for mounted competition data...")
-    train, test = find_competition_data_mount()
-    if train is not None and test is not None:
-        return train, test
-    
-    # Check if files exist in current directory
-    if os.path.exists('train.csv') and os.path.exists('test.csv'):
-        print("Loading data from current directory")
-        return pd.read_csv('train.csv'), pd.read_csv('test.csv')
-    
-    # Check for data in subdirectories (Kaggle competition data location)
-    train_files = glob.glob('**/train.csv', recursive=True)
-    test_files = glob.glob('**/test.csv', recursive=True)
-    
-    if train_files and test_files:
-        # Use the first found split (train_01 typically)
-        train_df = pd.read_csv(train_files[0])
-        test_df = pd.read_csv(test_files[0])
-        print(f"Loaded data from: {os.path.dirname(train_files[0])}")
-        return train_df, test_df
-    
-    # Check for data in data/train_XX pattern
-    data_dirs = glob.glob('data/train_*')
-    if data_dirs:
-        # Use the first available split
-        first_dir = data_dirs[0]
-        train_path = os.path.join(first_dir, 'train.csv')
-        test_path = os.path.join(first_dir, 'test.csv')
-        if os.path.exists(train_path) and os.path.exists(test_path):
-            print(f"Loaded data from: {first_dir}")
-            return pd.read_csv(train_path), pd.read_csv(test_path)
-    
-    # Try to download the data using Kaggle API
-    print("Data not found locally, attempting to download...")
-    if download_competition_data():
-        # Check again after download
-        data_dirs = glob.glob('data/train_*')
-        print(f"Data dirs after download: {data_dirs}")
-        if data_dirs:
-            first_dir = data_dirs[0]
-            train_path = os.path.join(first_dir, 'train.csv')
-            test_path = os.path.join(first_dir, 'test.csv')
-            if os.path.exists(train_path) and os.path.exists(test_path):
-                print(f"Loaded data from: {first_dir}")
-                return pd.read_csv(train_path), pd.read_csv(test_path)
-        
-        # Try alternative patterns
-        train_files = glob.glob('data/*/train.csv', recursive=True)
-        test_files = glob.glob('data/*/test.csv', recursive=True)
-        if train_files and test_files:
-            print(f"Loaded data from subdirectories")
-            return pd.read_csv(train_files[0]), pd.read_csv(test_files[0])
-    
-    return None, None
-
-
 def main():
     """Main entry point for training."""
-    # Parse experiment mode
     experiment = 'ensemble'
     if '--experiment' in sys.argv:
         idx = sys.argv.index('--experiment')
         if idx + 1 < len(sys.argv):
             experiment = sys.argv[idx + 1]
     
-    # Load data
     print("Loading competition data...")
-    train, test = find_and_load_data()
+    
+    # Try to load data
+    train, test = load_data()
     
     if train is None or test is None:
-        print("ERROR: Data files not found")
-        print(f"Files in current directory: {os.listdir('.')}")
-        csv_files = glob.glob('**/*.csv', recursive=True)
-        print(f"CSV files found: {csv_files}")
-        sys.exit(1)
+        print("Data not found, trying to download...")
+        if not download_data():
+            print("ERROR: Could not load or download data")
+            print(f"Current directory contents: {os.listdir('.')}")
+            sys.exit(1)
+        train, test = load_data()
+        if train is None or test is None:
+            print("ERROR: Still could not load data after download")
+            sys.exit(1)
     
     print(f"Loaded train shape: {train.shape}, test shape: {test.shape}")
     
@@ -189,40 +147,32 @@ def main():
             X_train[col] = X_train[col].fillna(X_train[col].median())
             X_test[col] = X_test[col].fillna(X_train[col].median())
     
-    # Outlier handling - clip numerical features to [1st, 99th] percentile
+    # Outlier handling
     for col in num_cols:
         if col in X_train.columns:
             lower, upper = X_train[col].quantile([0.01, 0.99])
             X_train[col] = X_train[col].clip(lower, upper)
             X_test[col] = X_test[col].clip(lower, upper)
     
-    # Target encoding for categorical columns
-    target_encoded = {}
+    # Target encoding
     for col in cat_cols:
-        # Calculate target mean per category
         target_mean = train.groupby(col)['target'].mean()
         global_mean = train['target'].mean()
-        
-        # Apply encoding
         X_train[col + '_te'] = X_train[col].map(target_mean).fillna(global_mean)
         X_test[col + '_te'] = X_test[col].map(target_mean).fillna(global_mean)
-        target_encoded[col] = target_mean
     
-    # Drop original categorical columns after target encoding
     X_train = X_train.drop(columns=cat_cols)
     X_test = X_test.drop(columns=cat_cols)
     
-    # Feature interactions (limited to top 5 pairs to avoid explosion)
-    interaction_cols = []
-    top_num_cols = num_cols[:5]  # Limit to top 5 numerical columns
+    # Feature interactions
+    top_num_cols = num_cols[:5]
     for col1, col2 in itertools.combinations(top_num_cols, 2):
         if col1 in X_train.columns and col2 in X_train.columns:
             new_col = f"{col1}_{col2}_mul"
             X_train[new_col] = (X_train[col1] * X_train[col2]).astype(float)
             X_test[new_col] = (X_test[col1] * X_test[col2]).astype(float)
-            interaction_cols.append(new_col)
     
-    # Feature selection using mutual information (limit to reasonable number)
+    # Feature selection
     all_features = X_train.columns.tolist()
     mi_scores = mutual_info_classif(X_train, y, random_state=42)
     mi_df = pd.DataFrame({'feature': all_features, 'mi_score': mi_scores})
@@ -230,37 +180,26 @@ def main():
     X_train = X_train[top_features]
     X_test = X_test[top_features]
     
-    # Split for internal validation
+    # Validation split
     X_tr, X_val, y_tr, y_val = train_test_split(X_train, y, test_size=0.2, random_state=42, stratify=y)
     
-    def get_model(name, n_samples, cat_features=None):
-        """Get model based on experiment mode."""
+    def get_model(name, n_samples):
         n_est = 100 if n_samples < 5000 else 150
-        
         if name == 'rf':
-            return RandomForestClassifier(n_estimators=n_est, max_depth=6, min_samples_split=5, 
-                                       random_state=42, n_jobs=-1)
+            return RandomForestClassifier(n_estimators=n_est, max_depth=6, min_samples_split=5, random_state=42, n_jobs=-1)
         if name == 'et':
             return ExtraTreesClassifier(n_estimators=n_est, max_depth=8, random_state=42, n_jobs=-1)
         if name == 'xgb':
             from xgboost import XGBClassifier
-            return XGBClassifier(n_estimators=n_est, max_depth=4, learning_rate=0.1, 
-                                   random_state=42, n_jobs=-1, verbosity=0)
+            return XGBClassifier(n_estimators=n_est, max_depth=4, learning_rate=0.1, random_state=42, n_jobs=-1, verbosity=0)
         if name == 'lgbm':
             from lightgbm import LGBMClassifier
-            return LGBMClassifier(n_estimators=n_est, max_depth=6, learning_rate=0.1, 
-                                  random_state=42, n_jobs=-1, verbose=-1)
+            return LGBMClassifier(n_estimators=n_est, max_depth=6, learning_rate=0.1, random_state=42, n_jobs=-1, verbose=-1)
         if name == 'gb':
-            return GradientBoostingClassifier(n_estimators=n_est, max_depth=4, 
-                                                learning_rate=0.1, random_state=42)
-        if name == 'cb' and cat_features:
-            from catboost import CatBoostClassifier
-            return CatBoostClassifier(iterations=100, depth=5, learning_rate=0.1, 
-                                      cat_features=cat_features, verbose=False, random_state=42)
+            return GradientBoostingClassifier(n_estimators=n_est, max_depth=4, learning_rate=0.1, random_state=42)
         return None
 
     def get_cv_score(model, X, y, n_folds=3):
-        """Get cross-validation score."""
         n_folds = min(n_folds, 3)
         cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
         scores = cross_val_score(model, X, y, cv=cv, scoring='roc_auc', n_jobs=-1)
@@ -268,77 +207,50 @@ def main():
 
     n_samples = len(train)
     predictions = []
-    model_ids = []
     model_scores = {}
-
-    # Train individual models
-    models_to_train = []
-    if experiment in ('rf', 'ensemble'):
-        models_to_train.append(('rf', 'rf'))
-    if experiment in ('et', 'ensemble'):
-        models_to_train.append(('et', 'et'))
-    if experiment in ('xgb', 'ensemble'):
-        models_to_train.append(('xgb', 'xgb'))
-    if experiment in ('lgbm', 'ensemble'):
-        models_to_train.append(('lgbm', 'lgbm'))
-    if experiment in ('gb', 'ensemble'):
-        models_to_train.append(('gb', 'gb'))
-
-    # Get categorical feature indices for CatBoost
-    cat_feature_indices = None
-    if cat_cols and experiment in ('cb', 'ensemble'):
-        te_cols = [c for c in X_train.columns if c.endswith('_te')]
-        if te_cols:
-            cat_feature_indices = [list(X_train.columns).index(c) for c in te_cols]
-
-    # Store trained models for stacking
     trained_models = {}
+
+    models_to_train = [('rf', 'rf'), ('et', 'et'), ('xgb', 'xgb'), ('lgbm', 'lgbm'), ('gb', 'gb')]
+    if experiment != 'ensemble':
+        models_to_train = [(m, k) for m, k in models_to_train if m == experiment]
 
     for name, key in models_to_train:
         try:
-            model = get_model(name, n_samples, cat_feature_indices)
+            model = get_model(name, n_samples)
             if model is None:
                 continue
-                
-            # Cross-validation score
+            
             cv_score, cv_std = get_cv_score(model, X_train, y)
             model_scores[name] = cv_score
             print(f"{name}: CV={cv_score:.4f} (+/- {cv_std:.4f})")
             
-            # Train on full data
             model.fit(X_train, y)
             trained_models[name] = model
             pred = model.predict_proba(X_test)[:, 1]
             predictions.append(pred)
-            model_ids.append(name)
-            
-            # Save individual prediction
             pd.DataFrame({'row_id': test['row_id'], 'target': pred}).to_csv(f'{key}_pred.csv', index=False)
         except Exception as e:
             print(f"{name}: Failed - {e}")
             continue
 
-    # Stacking ensemble with meta-learner
+    # Ensemble
     if len(predictions) >= 3:
-        # Get out-of-fold predictions for stacking
         stacking_preds = []
         for name, key in models_to_train[:5]:
             if name in model_scores:
-                model = get_model(name, n_samples, cat_feature_indices)
+                model = get_model(name, n_samples)
                 oof_preds = cross_val_predict(model, X_train, y, cv=3, method='predict_proba')[:, 1]
                 stacking_preds.append(oof_preds)
         
         if len(stacking_preds) >= 3:
-            # Train meta-learner on OOF predictions
             meta_X = np.column_stack(stacking_preds)
             meta_learner = LogisticRegression(max_iter=1000, random_state=42)
             meta_learner.fit(meta_X, y)
             
-            # Get final predictions for test set from all models
             test_preds = []
             for name, key in models_to_train[:5]:
                 if name in model_scores:
-                    model = trained_models.get(name) or get_model(name, n_samples, cat_feature_indices)
+                    model = trained_models.get(name) or get_model(name, n_samples)
                     if model:
                         if name not in trained_models:
                             model.fit(X_train, y)
@@ -348,41 +260,32 @@ def main():
             if test_preds:
                 test_meta_X = np.column_stack(test_preds[:len(stacking_preds)])
                 stacking_pred = meta_learner.predict_proba(test_meta_X)[:, 1]
-                
-                # Blend stacking with best individual model
-                best_model = list(model_scores.keys())[0] if not model_scores else max(model_scores, key=model_scores.get)
+                best_model = max(model_scores, key=model_scores.get)
                 best_idx = list(model_scores.keys()).index(best_model)
-                best_pred = predictions[best_idx] if best_idx < len(predictions) else predictions[0]
-                
-                # Weighted blend
+                best_pred = predictions[best_idx]
                 blending_weight = 0.6
                 final_pred = blending_weight * stacking_pred + (1 - blending_weight) * best_pred
-                
                 pd.DataFrame({'row_id': test['row_id'], 'target': final_pred}).to_csv('final_submission.csv', index=False)
-                print(f"Saved final_submission.csv (stacking blend, {len(predictions)} models)")
+                print(f"Saved final_submission.csv (stacking blend)")
             else:
-                # Fallback to variance-weighted ensemble
                 weights = [1.0/np.var(p) for p in predictions]
                 weights = [w/sum(weights) for w in weights]
                 ensemble = np.average(predictions, axis=0, weights=weights)
                 pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-                print(f"Saved final_submission.csv ({len(predictions)} models, variance-weighted)")
+                print(f"Saved final_submission.csv (variance-weighted)")
         else:
-            # Fallback to variance-weighted ensemble
             weights = [1.0/np.var(p) for p in predictions]
             weights = [w/sum(weights) for w in weights]
             ensemble = np.average(predictions, axis=0, weights=weights)
             pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-            print(f"Saved final_submission.csv ({len(predictions)} models, variance-weighted)")
+            print(f"Saved final_submission.csv (variance-weighted)")
     elif len(predictions) > 1:
-        # Fallback to variance-weighted ensemble
         weights = [1.0/np.var(p) for p in predictions]
         weights = [w/sum(weights) for w in weights]
         ensemble = np.average(predictions, axis=0, weights=weights)
         pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-        print(f"Saved final_submission.csv ({len(predictions)} models, variance-weighted)")
+        print(f"Saved final_submission.csv (variance-weighted)")
     else:
-        # Single model fallback
         pd.DataFrame({'row_id': test['row_id'], 'target': predictions[0]}).to_csv('final_submission.csv', index=False)
         print(f"Saved final_submission.csv (1 model)")
 
