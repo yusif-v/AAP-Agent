@@ -1,0 +1,10 @@
+name: automl_agent
+model: claude-sonnet-4
+instruction: !include prompts/system.md
+tools:
+  - run_command
+  - write_file
+  - edit_file
+  - submit_predictions
+  - select_submission
+  - get_status
