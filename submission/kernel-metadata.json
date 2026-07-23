@@ -15,5 +15,8 @@
         },
         "tags": ["autonomous-agent", "automl", "ensemble", "stacking"],
         "category": "research"
-    }
+    },
+    "tags": ["autonomous-agent", "automl"],
+    "enable_gpu": true,
+    "enable_internet": false
 }
