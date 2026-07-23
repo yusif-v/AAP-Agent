@@ -6,6 +6,7 @@ This script runs the autonomous agent in the Kaggle sandbox.
 
 import sys
 import os
+import time
 import pandas as pd
 import numpy as np
 import warnings
@@ -19,6 +20,39 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
+def find_and_load_data():
+    """Find and load competition data files, handling multi-split structure."""
+    import glob
+    
+    # First check if files exist in current directory
+    if os.path.exists('train.csv') and os.path.exists('test.csv'):
+        return pd.read_csv('train.csv'), pd.read_csv('test.csv')
+    
+    # Check for data in subdirectories (Kaggle competition data location)
+    train_files = glob.glob('**/train.csv', recursive=True)
+    test_files = glob.glob('**/test.csv', recursive=True)
+    
+    if train_files and test_files:
+        # Use the first found split (train_01 typically)
+        train_df = pd.read_csv(train_files[0])
+        test_df = pd.read_csv(test_files[0])
+        print(f"Loaded data from: {os.path.dirname(train_files[0])}")
+        return train_df, test_df
+    
+    # Check for data in data/train_XX pattern
+    data_dirs = glob.glob('data/train_*')
+    if data_dirs:
+        # Use the first available split
+        first_dir = data_dirs[0]
+        train_path = os.path.join(first_dir, 'train.csv')
+        test_path = os.path.join(first_dir, 'test.csv')
+        if os.path.exists(train_path) and os.path.exists(test_path):
+            print(f"Loaded data from: {first_dir}")
+            return pd.read_csv(train_path), pd.read_csv(test_path)
+    
+    return None, None
+
+
 def main():
     """Main entry point for training."""
     # Parse experiment mode
@@ -29,8 +63,16 @@ def main():
             experiment = sys.argv[idx + 1]
     
     # Load data - Kaggle sandbox provides these files
-    train = pd.read_csv('train.csv')
-    test = pd.read_csv('test.csv')
+    print("Loading competition data...")
+    train, test = find_and_load_data()
+    
+    if train is None or test is None:
+        print("ERROR: Data files not found")
+        print(f"Files in current directory: {os.listdir('.')}")
+        import glob
+        csv_files = glob.glob('**/*.csv', recursive=True)
+        print(f"CSV files found: {csv_files}")
+        sys.exit(1)
     
     print(f"Loaded train shape: {train.shape}, test shape: {test.shape}")
     
