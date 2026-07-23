@@ -21,6 +21,34 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
+def find_competition_data_mount():
+    """Find competition data mounted at /kaggle/input/<competition-name>/"""
+    input_dir = '/kaggle/input'
+    if os.path.exists(input_dir):
+        # Look for competition data directories
+        for item in os.listdir(input_dir):
+            item_path = os.path.join(input_dir, item)
+            if os.path.isdir(item_path):
+                # Check for train.csv and test.csv
+                train_path = os.path.join(item_path, 'train.csv')
+                test_path = os.path.join(item_path, 'test.csv')
+                if os.path.exists(train_path) and os.path.exists(test_path):
+                    print(f"Found competition data mounted at: {item_path}")
+                    return pd.read_csv(train_path), pd.read_csv(test_path)
+                
+                # Check for multi-split data (train_01, train_02, etc.)
+                data_dirs = glob.glob(os.path.join(item_path, 'train_*'))
+                if data_dirs:
+                    first_dir = data_dirs[0]
+                    train_path = os.path.join(first_dir, 'train.csv')
+                    test_path = os.path.join(first_dir, 'test.csv')
+                    if os.path.exists(train_path) and os.path.exists(test_path):
+                        print(f"Found multi-split data at: {first_dir}")
+                        return pd.read_csv(train_path), pd.read_csv(test_path)
+    
+    return None, None
+
+
 def download_competition_data():
     """Download competition data from Kaggle using Python API."""
     print("Downloading competition data using Kaggle API...")
@@ -67,7 +95,13 @@ def download_competition_data():
 
 def find_and_load_data():
     """Find and load competition data files, handling multi-split structure."""
-    # First check if files exist in current directory
+    # First check for mounted competition data (Kaggle provides this for competition kernels)
+    print("Checking for mounted competition data...")
+    train, test = find_competition_data_mount()
+    if train is not None and test is not None:
+        return train, test
+    
+    # Check if files exist in current directory
     if os.path.exists('train.csv') and os.path.exists('test.csv'):
         print("Loading data from current directory")
         return pd.read_csv('train.csv'), pd.read_csv('test.csv')
