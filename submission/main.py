@@ -7,10 +7,13 @@ This script runs the autonomous agent in the Kaggle sandbox.
 import sys
 import os
 import time
+import glob
 import pandas as pd
 import numpy as np
 import warnings
 import itertools
+import subprocess
+import zipfile
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, cross_val_predict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
@@ -20,12 +23,46 @@ from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 
+def download_competition_data():
+    """Download competition data from Kaggle if not available locally."""
+    print("Downloading competition data...")
+    
+    # Try using kaggle CLI to download the data
+    try:
+        # Create data directory
+        os.makedirs('data', exist_ok=True)
+        
+        # Download competition data
+        result = subprocess.run(
+            ['kaggle', 'competitions', 'download', '-c', 'autonomous-agent-prediction-beta', '-p', 'data'],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        
+        if result.returncode == 0:
+            print("Downloaded competition data successfully")
+            # Find and unzip the zip file
+            zip_files = glob.glob('data/*.zip')
+            for zip_file in zip_files:
+                print(f"Unzipping {zip_file}...")
+                with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                    zip_ref.extractall('data')
+                os.remove(zip_file)
+            return True
+        else:
+            print(f"Download failed: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"Error downloading data: {e}")
+        return False
+
+
 def find_and_load_data():
     """Find and load competition data files, handling multi-split structure."""
-    import glob
-    
     # First check if files exist in current directory
     if os.path.exists('train.csv') and os.path.exists('test.csv'):
+        print("Loading data from current directory")
         return pd.read_csv('train.csv'), pd.read_csv('test.csv')
     
     # Check for data in subdirectories (Kaggle competition data location)
@@ -50,6 +87,19 @@ def find_and_load_data():
             print(f"Loaded data from: {first_dir}")
             return pd.read_csv(train_path), pd.read_csv(test_path)
     
+    # Try to download the data
+    print("Data not found locally, attempting to download...")
+    if download_competition_data():
+        # Check again after download
+        data_dirs = glob.glob('data/train_*')
+        if data_dirs:
+            first_dir = data_dirs[0]
+            train_path = os.path.join(first_dir, 'train.csv')
+            test_path = os.path.join(first_dir, 'test.csv')
+            if os.path.exists(train_path) and os.path.exists(test_path):
+                print(f"Loaded data from: {first_dir}")
+                return pd.read_csv(train_path), pd.read_csv(test_path)
+    
     return None, None
 
 
@@ -62,14 +112,13 @@ def main():
         if idx + 1 < len(sys.argv):
             experiment = sys.argv[idx + 1]
     
-    # Load data - Kaggle sandbox provides these files
+    # Load data
     print("Loading competition data...")
     train, test = find_and_load_data()
     
     if train is None or test is None:
         print("ERROR: Data files not found")
         print(f"Files in current directory: {os.listdir('.')}")
-        import glob
         csv_files = glob.glob('**/*.csv', recursive=True)
         print(f"CSV files found: {csv_files}")
         sys.exit(1)
@@ -141,7 +190,7 @@ def main():
         
         if name == 'rf':
             return RandomForestClassifier(n_estimators=n_est, max_depth=6, min_samples_split=5, 
-                                           random_state=42, n_jobs=-1)
+                                       random_state=42, n_jobs=-1)
         if name == 'et':
             return ExtraTreesClassifier(n_estimators=n_est, max_depth=8, random_state=42, n_jobs=-1)
         if name == 'xgb':
