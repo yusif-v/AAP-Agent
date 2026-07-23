@@ -12,7 +12,7 @@
     "tags": ["autonomous-agent", "automl", "ensemble", "stacking"],
     "category": "research",
     "enable_gpu": true,
-    "enable_internet": false,
+    "enable_internet": true,
     "code_file": "main.py",
     "competition_sources": ["autonomous-agent-prediction-beta"],
     "data_split": "train_01"
