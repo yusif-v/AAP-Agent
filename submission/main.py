@@ -54,6 +54,8 @@ def load_data():
     # Method 3: Check data/train_XX pattern
     data_dirs = glob.glob('data/train_*')
     if data_dirs:
+        # Sort to ensure deterministic order (train_01, train_02, ...)
+        data_dirs.sort()
         first_dir = data_dirs[0]
         train_path = os.path.join(first_dir, 'train.csv')
         test_path = os.path.join(first_dir, 'test.csv')
