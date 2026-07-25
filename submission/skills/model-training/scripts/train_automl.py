@@ -85,9 +85,14 @@ def main():
     X_train = X_train.drop(columns=cat_cols)
     X_test = X_test.drop(columns=cat_cols)
 
-    # Feature interactions (limited to top 5 pairs to avoid explosion)
+    # Feature interactions - pick the top 5 numerical features by mutual information with
+    # the target, not just the first 5 columns in source-file order
     interaction_cols = []
-    top_num_cols = num_cols[:5]  # Limit to top 5 numerical columns
+    if num_cols:
+        num_mi = mutual_info_classif(X_train[num_cols], y, random_state=42)
+        top_num_cols = pd.Series(num_mi, index=num_cols).nlargest(min(5, len(num_cols))).index.tolist()
+    else:
+        top_num_cols = []
     for col1, col2 in itertools.combinations(top_num_cols, 2):
         if col1 in X_train.columns and col2 in X_train.columns:
             new_col = f"{col1}_{col2}_mul"
@@ -220,8 +225,40 @@ def main():
         best_name = max(model_scores, key=model_scores.get)
         dist = PARAM_DISTS.get(best_name)
         if best_name == 'cb':
-            print("Skipping RandomizedSearchCV for cb: CatBoostClassifier with cat_features "
-                  "set can't be cloned by sklearn's search CV.")
+            # sklearn's RandomizedSearchCV can't clone a CatBoostClassifier with cat_features
+            # set, so use CatBoost's own randomized_search to pick candidate params, then
+            # re-score those params with our own manual per-fold CV (matching get_cv_score's
+            # methodology) rather than trusting CatBoost's internal train/test-split search score.
+            print(f"Tuning cb (baseline CV={model_scores['cb']:.4f}) via CatBoost's native search...")
+            search_model = get_model('cb', n_samples, cat_feature_indices)
+            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+            search_result = search_model.randomized_search(
+                dist, X=cb_X_train, y=y, cv=cv, n_iter=15,
+                search_by_train_test_split=False, verbose=False, plot=False)
+            best_params = search_result['params']
+
+            def get_tuned_cb():
+                params = dict(iterations=100, depth=5, learning_rate=0.1,
+                              cat_features=cat_feature_indices, verbose=False, random_state=42)
+                params.update(best_params)
+                from catboost import CatBoostClassifier
+                return CatBoostClassifier(**params)
+
+            scores = []
+            for tr_idx, val_idx in cv.split(cb_X_train, y):
+                m = get_tuned_cb()
+                m.fit(cb_X_train.iloc[tr_idx], y[tr_idx])
+                pred = m.predict_proba(cb_X_train.iloc[val_idx])[:, 1]
+                scores.append(roc_auc_score(y[val_idx], pred))
+            tuned_score = np.mean(scores)
+            print(f"Tuned cb: CV={tuned_score:.4f}, params={best_params}")
+
+            if tuned_score > model_scores['cb'] and 'cb' in model_ids:
+                final_model = get_tuned_cb()
+                final_model.fit(cb_X_train, y)
+                trained_models['cb'] = final_model
+                predictions[model_ids.index('cb')] = final_model.predict_proba(cb_X_test)[:, 1]
+                model_scores['cb'] = tuned_score
         elif dist:
             print(f"Tuning {best_name} (baseline CV={model_scores[best_name]:.4f})...")
             base_model = get_model(best_name, n_samples, cat_feature_indices)
