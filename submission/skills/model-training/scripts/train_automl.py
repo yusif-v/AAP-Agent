@@ -40,14 +40,16 @@ def main():
 
     # Load data
     train = pd.read_csv('train.csv'); test = pd.read_csv('test.csv')
-    cat_cols = [c for c in train.columns if train[c].dtype == 'object' and c.startswith('feature_')]
+    cat_cols = [c for c in train.columns
+                if (pd.api.types.is_object_dtype(train[c]) or pd.api.types.is_string_dtype(train[c]))
+                and c.startswith('feature_')]
     num_cols = [c for c in train.columns if c not in cat_cols and c not in ['row_id', 'target']]
     y = train['target'].values
     X_train = train.drop(columns=['row_id', 'target']); X_test = test.drop(columns=['row_id'])
 
     # Impute
     for col in X_train.columns:
-        if X_train[col].dtype == 'object':
+        if pd.api.types.is_object_dtype(X_train[col]) or pd.api.types.is_string_dtype(X_train[col]):
             X_train[col] = X_train[col].fillna('missing')
             X_test[col] = X_test[col].fillna('missing')
         else:
