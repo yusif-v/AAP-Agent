@@ -44,7 +44,7 @@ Execute this loop until budget/time runs low:
 ### Phase 1: Baseline & Exploration (first ~15% of budget)
 1. Check data size and features:
    `run_command("python -c 'import pandas as pd; df=pd.read_csv(\"train.csv\"); print(f\"Shape: {df.shape}\"); print(f\"Categorical: {[c for c in df.columns if df[c].dtype==\"object\" and c.startswith(\"feature_\")]}\")'")`
-2. Run baseline training: `run_command("python train_automl.py --experiment rf")`
+2. Run baseline training: `run_command("python scripts/train_automl.py --experiment rf")`
 3. Submit baseline: `submit_predictions("final_submission.csv")`
 4. Record submission ID and score in tracking table
 5. Check `get_status()` to monitor budget
@@ -55,13 +55,14 @@ For each experiment, train, submit, and track scores:
 - **Experiment B**: LightGBM only → submit → record  
 - **Experiment C**: CatBoost only (if categorical features exist) → submit → record
 - **Experiment D**: ExtraTrees + RF ensemble → submit → record
-- **Experiment E**: Full 5-model ensemble → submit → record
+- **Experiment E**: Full 6-model ensemble (`--experiment ensemble`) → submit → record
 
 After each: call `get_status()` to monitor budget
 
 ### Phase 3: Hyperparameter Tuning (next ~25% of budget)
 For the best-performing model from Phase 2:
-- Run focused tuning (Optuna or grid search) on key hyperparameters
+- Re-run with `--tune` appended (e.g. `run_command("python scripts/train_automl.py --experiment ensemble --tune")`)
+  to run a sklearn RandomizedSearchCV pass on the top model — no internet/optuna needed or available
 - Use cross-validation within training script
 - Submit best tuned model → record score
 
