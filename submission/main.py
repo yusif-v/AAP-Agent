@@ -240,10 +240,10 @@ def main():
         if name == 'gb':
             return GradientBoostingClassifier(n_estimators=n_est, max_depth=4,
                                                 learning_rate=0.1, random_state=42)
-        if name == 'cb' and cat_features:
+        if name == 'cb':
             from catboost import CatBoostClassifier
             return CatBoostClassifier(iterations=100, depth=5, learning_rate=0.1,
-                                      cat_features=cat_features, verbose=False, random_state=42)
+                                      cat_features=cat_features or None, verbose=False, random_state=42)
         return None
 
     def get_cv_score(name, X, y, cat_features=None, n_folds=5):
@@ -288,10 +288,11 @@ def main():
         models_to_train.append(('gb', 'gb'))
 
     # Get categorical feature indices for CatBoost, relative to cb_X_train (which keeps
-    # the raw categorical strings rather than the target-encoded numeric columns)
-    cat_feature_indices = None
-    if cat_cols and experiment in ('cb', 'ensemble'):
-        cat_feature_indices = [cb_X_train.columns.get_loc(c) for c in cat_cols]
+    # the raw categorical strings rather than the target-encoded numeric columns). CatBoost
+    # still runs even when there are no categorical columns at all - it's a perfectly
+    # capable model on purely numeric data too, it just gets an empty cat_features list.
+    cat_feature_indices = [cb_X_train.columns.get_loc(c) for c in cat_cols] if cat_cols else []
+    if experiment in ('cb', 'ensemble'):
         models_to_train.append(('cb', 'cb'))
 
     def X_for(name):
@@ -340,7 +341,7 @@ def main():
 
             def get_tuned_cb():
                 params = dict(iterations=100, depth=5, learning_rate=0.1,
-                              cat_features=cat_feature_indices, verbose=False, random_state=42)
+                              cat_features=cat_feature_indices or None, verbose=False, random_state=42)
                 params.update(best_params)
                 from catboost import CatBoostClassifier
                 return CatBoostClassifier(**params)
