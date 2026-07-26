@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import warnings
 import itertools
+import re
 import zipfile
 from sklearn.model_selection import train_test_split, StratifiedKFold, RandomizedSearchCV
 from sklearn.preprocessing import LabelEncoder
@@ -147,13 +148,25 @@ def main():
 
     print(f"Loaded train shape: {train.shape}, test shape: {test.shape}")
 
-    cat_cols = [c for c in train.columns
-                if (pd.api.types.is_object_dtype(train[c]) or pd.api.types.is_string_dtype(train[c]))
-                and c.startswith('feature_')]
+    raw_cat_cols = [c for c in train.columns
+                    if (pd.api.types.is_object_dtype(train[c]) or pd.api.types.is_string_dtype(train[c]))
+                    and c.startswith('feature_')]
+
+    # Ordinal columns (e.g. 'ord_0'..'ord_6') carry a monotonic target-rate relationship -
+    # decode to their integer rank instead of target-encoding them like an unordered
+    # category, which would flatten that order into an arbitrary-looking float.
+    ORDINAL_RE = re.compile(r'^ord_(\d+)$')
+    ordinal_cols = [c for c in raw_cat_cols
+                    if train[c].dropna().astype(str).str.match(ORDINAL_RE).all()]
+    cat_cols = [c for c in raw_cat_cols if c not in ordinal_cols]
     num_cols = [c for c in train.columns if c not in cat_cols and c not in ['row_id', 'target']]
     y = train['target'].values
     X_train = train.drop(columns=['row_id', 'target'])
     X_test = test.drop(columns=['row_id'])
+
+    for col in ordinal_cols:
+        X_train[col] = X_train[col].str.extract(r'(\d+)$', expand=False).astype(float)
+        X_test[col] = X_test[col].str.extract(r'(\d+)$', expand=False).astype(float)
 
     # Impute
     for col in X_train.columns:
@@ -171,18 +184,27 @@ def main():
             X_train[col] = X_train[col].clip(lower, upper)
             X_test[col] = X_test[col].clip(lower, upper)
 
-    # CatBoost gets its own feature matrix with raw categorical strings intact -
+    # CatBoost gets its own feature matrix with raw categorical strings intact (for the
+    # remaining unordered cat_cols - ordinal_cols are already numeric by this point) -
     # target encoding below replaces cat_cols with numeric _te columns for the other models,
     # and CatBoost's whole value-add is native categorical handling, not target-encoded floats.
     cb_X_train = X_train.copy()
     cb_X_test = X_test.copy()
 
-    # Target encoding for categorical columns
+    # Out-of-fold (K-fold) target encoding for the remaining unordered categorical columns.
+    # A straight full-data groupby mean lets each row see its own target's contribution to
+    # its own category's mean, which leaks and can overfit on smaller categories.
+    te_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    global_mean = y.mean()
     for col in cat_cols:
-        target_mean = train.groupby(col)['target'].mean()
-        global_mean = train['target'].mean()
-        X_train[col + '_te'] = X_train[col].map(target_mean).fillna(global_mean)
-        X_test[col + '_te'] = X_test[col].map(target_mean).fillna(global_mean)
+        oof_te = np.zeros(len(X_train))
+        for tr_idx, val_idx in te_cv.split(X_train, y):
+            fold_means = pd.Series(y[tr_idx]).groupby(X_train[col].iloc[tr_idx].values).mean()
+            oof_te[val_idx] = X_train[col].iloc[val_idx].map(fold_means).fillna(global_mean).values
+        X_train[col + '_te'] = oof_te
+        # Test set has no target to leak, so encode with the full-train category means.
+        full_means = pd.Series(y).groupby(X_train[col].values).mean()
+        X_test[col + '_te'] = X_test[col].map(full_means).fillna(global_mean)
 
     X_train = X_train.drop(columns=cat_cols)
     X_test = X_test.drop(columns=cat_cols)
@@ -199,14 +221,6 @@ def main():
             new_col = f"{col1}_{col2}_mul"
             X_train[new_col] = (X_train[col1] * X_train[col2]).astype(float)
             X_test[new_col] = (X_test[col1] * X_test[col2]).astype(float)
-
-    # Feature selection using mutual information (limit to reasonable number)
-    all_features = X_train.columns.tolist()
-    mi_scores = mutual_info_classif(X_train, y, random_state=42)
-    mi_df = pd.DataFrame({'feature': all_features, 'mi_score': mi_scores})
-    top_features = mi_df.nlargest(min(30, len(all_features)), 'mi_score')['feature'].tolist()
-    X_train = X_train[top_features]
-    X_test = X_test[top_features]
 
     def get_model(name, n_samples, cat_features=None):
         n_est = 100 if n_samples < 5000 else 150
