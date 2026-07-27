@@ -27,6 +27,33 @@ PARAM_DISTS = {
     'cb': {'iterations': [100, 200, 300], 'depth': [4, 5, 6, 7], 'learning_rate': [0.03, 0.05, 0.1]},
 }
 
+CB_SEEDS = (42, 142, 242, 342, 442)
+
+
+class SeedAveragedCatBoost:
+    """Trains one CatBoostClassifier per seed and averages predict_proba - a cheap
+    variance reducer on a dataset this small (~15k rows), where a single seed's fold
+    assignment can swing the score more than a genuine modeling improvement would."""
+
+    def __init__(self, cat_features=None, seeds=CB_SEEDS, **params):
+        self.cat_features = cat_features
+        self.seeds = seeds
+        self.params = params
+        self.models = []
+
+    def fit(self, X, y):
+        from catboost import CatBoostClassifier
+        self.models = []
+        for seed in self.seeds:
+            model = CatBoostClassifier(cat_features=self.cat_features or None,
+                                        random_state=seed, verbose=False, **self.params)
+            model.fit(X, y)
+            self.models.append(model)
+        return self
+
+    def predict_proba(self, X):
+        return np.mean([m.predict_proba(X) for m in self.models], axis=0)
+
 
 def main():
     """Main entry point for training."""
@@ -140,9 +167,8 @@ def main():
             return GradientBoostingClassifier(n_estimators=n_est, max_depth=4, 
                                                 learning_rate=0.1, random_state=42)
         if name == 'cb':
-            from catboost import CatBoostClassifier
-            return CatBoostClassifier(iterations=100, depth=5, learning_rate=0.1,
-                                      cat_features=cat_features or None, verbose=False, random_state=42)
+            return SeedAveragedCatBoost(cat_features=cat_features, iterations=100, depth=5,
+                                         learning_rate=0.1)
         return None
 
     def get_cv_score(name, X, y, cat_features=None, n_folds=5):
@@ -239,7 +265,12 @@ def main():
             # re-score those params with our own manual per-fold CV (matching get_cv_score's
             # methodology) rather than trusting CatBoost's internal train/test-split search score.
             print(f"Tuning cb (baseline CV={model_scores['cb']:.4f}) via CatBoost's native search...")
-            search_model = get_model('cb', n_samples, cat_feature_indices)
+            # randomized_search is a CatBoost-native method the SeedAveragedCatBoost wrapper
+            # doesn't have - use a plain single-seed CatBoostClassifier just for the search.
+            from catboost import CatBoostClassifier
+            search_model = CatBoostClassifier(iterations=100, depth=5, learning_rate=0.1,
+                                               cat_features=cat_feature_indices or None,
+                                               verbose=False, random_state=42)
             cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
             search_result = search_model.randomized_search(
                 dist, X=cb_X_train, y=y, cv=cv, n_iter=15,
@@ -247,11 +278,9 @@ def main():
             best_params = search_result['params']
 
             def get_tuned_cb():
-                params = dict(iterations=100, depth=5, learning_rate=0.1,
-                              cat_features=cat_feature_indices or None, verbose=False, random_state=42)
+                params = dict(iterations=100, depth=5, learning_rate=0.1)
                 params.update(best_params)
-                from catboost import CatBoostClassifier
-                return CatBoostClassifier(**params)
+                return SeedAveragedCatBoost(cat_features=cat_feature_indices, **params)
 
             scores = []
             for tr_idx, val_idx in cv.split(cb_X_train, y):
