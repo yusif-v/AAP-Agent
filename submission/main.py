@@ -30,7 +30,11 @@ PARAM_DISTS = {
     'lgbm': {'n_estimators': [100, 200, 300], 'max_depth': [4, 6, 8, -1], 'learning_rate': [0.03, 0.05, 0.1],
              'num_leaves': [15, 31, 63], 'subsample': [0.7, 0.85, 1.0]},
     'gb': {'n_estimators': [100, 200], 'max_depth': [3, 4, 5], 'learning_rate': [0.03, 0.05, 0.1]},
-    'cb': {'iterations': [100, 200, 300], 'depth': [4, 5, 6, 7], 'learning_rate': [0.03, 0.05, 0.1]},
+    # No 'iterations' here - early stopping already controls tree count (see
+    # SeedAveragedCatBoost/EarlyStoppingXGB/EarlyStoppingLGBM), so tuning searches
+    # depth/learning_rate/regularization instead of re-litigating the ceiling.
+    'cb': {'depth': [4, 5, 6, 7, 8], 'learning_rate': [0.02, 0.03, 0.05, 0.08],
+           'l2_leaf_reg': [1, 3, 5, 7, 9]},
 }
 
 CB_SEEDS = (42, 142, 242, 342, 442)
@@ -51,14 +55,59 @@ class SeedAveragedCatBoost:
         from catboost import CatBoostClassifier
         self.models = []
         for seed in self.seeds:
+            # Each seed gets its own early-stopping split (varying with the seed) rather
+            # than a single hardcoded iteration count - lets iterations run until they
+            # actually stop helping instead of guessing a fixed ceiling.
+            X_tr, X_es, y_tr, y_es = train_test_split(X, y, test_size=0.15, random_state=seed,
+                                                       stratify=y)
             model = CatBoostClassifier(cat_features=self.cat_features or None,
-                                        random_state=seed, verbose=False, **self.params)
-            model.fit(X, y)
+                                        random_state=seed, verbose=False,
+                                        early_stopping_rounds=50, **self.params)
+            model.fit(X_tr, y_tr, eval_set=(X_es, y_es))
             self.models.append(model)
         return self
 
     def predict_proba(self, X):
         return np.mean([m.predict_proba(X) for m in self.models], axis=0)
+
+
+class EarlyStoppingXGB:
+    """XGBoost with a high n_estimators ceiling and early stopping on an internal
+    validation split, instead of a small hardcoded n_estimators guess."""
+
+    def __init__(self, **params):
+        self.params = params
+        self.model = None
+
+    def fit(self, X, y):
+        from xgboost import XGBClassifier
+        X_tr, X_es, y_tr, y_es = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+        self.model = XGBClassifier(early_stopping_rounds=50, **self.params)
+        self.model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+        return self
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+
+class EarlyStoppingLGBM:
+    """LightGBM with a high n_estimators ceiling and early stopping on an internal
+    validation split, instead of a small hardcoded n_estimators guess."""
+
+    def __init__(self, **params):
+        self.params = params
+        self.model = None
+
+    def fit(self, X, y):
+        from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+        X_tr, X_es, y_tr, y_es = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+        self.model = LGBMClassifier(**self.params)
+        self.model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)],
+                       callbacks=[early_stopping(50, verbose=False), log_evaluation(0)])
+        return self
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
 
 
 def load_data():
@@ -250,26 +299,25 @@ def main():
             X_test[new_col] = (X_test[col1] * X_test[col2]).astype(float)
 
     def get_model(name, n_samples, cat_features=None):
-        n_est = 100 if n_samples < 5000 else 150
+        n_est = 300 if n_samples < 5000 else 500
         if name == 'rf':
-            return RandomForestClassifier(n_estimators=n_est, max_depth=6, min_samples_split=5,
+            return RandomForestClassifier(n_estimators=n_est, max_depth=8, min_samples_split=5,
                                            random_state=42, n_jobs=-1)
         if name == 'et':
-            return ExtraTreesClassifier(n_estimators=n_est, max_depth=8, random_state=42, n_jobs=-1)
+            return ExtraTreesClassifier(n_estimators=n_est, max_depth=10, random_state=42, n_jobs=-1)
         if name == 'xgb':
-            from xgboost import XGBClassifier
-            return XGBClassifier(n_estimators=n_est, max_depth=4, learning_rate=0.1,
-                                   random_state=42, n_jobs=-1, verbosity=0)
+            return EarlyStoppingXGB(n_estimators=2000, max_depth=4, learning_rate=0.03,
+                                     random_state=42, n_jobs=-1, verbosity=0)
         if name == 'lgbm':
-            from lightgbm import LGBMClassifier
-            return LGBMClassifier(n_estimators=n_est, max_depth=6, learning_rate=0.1,
-                                  random_state=42, n_jobs=-1, verbose=-1)
+            return EarlyStoppingLGBM(n_estimators=2000, max_depth=6, learning_rate=0.03,
+                                      random_state=42, n_jobs=-1, verbose=-1)
         if name == 'gb':
-            return GradientBoostingClassifier(n_estimators=n_est, max_depth=4,
-                                                learning_rate=0.1, random_state=42)
+            return GradientBoostingClassifier(n_estimators=1000, max_depth=4, learning_rate=0.03,
+                                                n_iter_no_change=20, validation_fraction=0.15,
+                                                random_state=42)
         if name == 'cb':
-            return SeedAveragedCatBoost(cat_features=cat_features, iterations=100, depth=5,
-                                         learning_rate=0.1)
+            return SeedAveragedCatBoost(cat_features=cat_features, iterations=2000, depth=6,
+                                         learning_rate=0.03)
         return None
 
     def get_cv_score(name, X, y, cat_features=None, n_folds=5):
@@ -359,10 +407,12 @@ def main():
             # the untuned baseline is apples-to-apples.
             print(f"Tuning cb (baseline CV={model_scores['cb']:.4f}) via CatBoost's native search...")
             # randomized_search is a CatBoost-native method the SeedAveragedCatBoost wrapper
-            # doesn't have - use a plain single-seed CatBoostClassifier just for the search.
+            # doesn't have - use a plain single-seed CatBoostClassifier just for the search,
+            # with the same high iteration ceiling + early stopping as the real model uses.
             from catboost import CatBoostClassifier
-            search_model = CatBoostClassifier(iterations=100, depth=5, learning_rate=0.1,
+            search_model = CatBoostClassifier(iterations=2000, depth=6, learning_rate=0.03,
                                                cat_features=cat_feature_indices or None,
+                                               early_stopping_rounds=50,
                                                verbose=False, random_state=42)
             cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
             search_result = search_model.randomized_search(
@@ -371,7 +421,7 @@ def main():
             best_params = search_result['params']
 
             def get_tuned_cb():
-                params = dict(iterations=100, depth=5, learning_rate=0.1)
+                params = dict(iterations=2000, depth=6, learning_rate=0.03)
                 params.update(best_params)
                 return SeedAveragedCatBoost(cat_features=cat_feature_indices, **params)
 
@@ -390,6 +440,13 @@ def main():
                 trained_models['cb'] = final_model
                 predictions[model_ids.index('cb')] = final_model.predict_proba(cb_X_test)[:, 1]
                 model_scores['cb'] = tuned_score
+        elif best_name in ('xgb', 'lgbm'):
+            # EarlyStoppingXGB/EarlyStoppingLGBM aren't proper sklearn estimators (no
+            # get_params/set_params), so RandomizedSearchCV can't clone them - same
+            # constraint as cb. Early stopping already tunes the n_estimators dimension,
+            # which was most of what a search here would have covered anyway.
+            print(f"Skipping RandomizedSearchCV for {best_name}: not a clonable sklearn "
+                  "estimator (uses early stopping internally instead).")
         elif dist:
             print(f"Tuning {best_name} (baseline CV={model_scores[best_name]:.4f})...")
             base_model = get_model(best_name, n_samples, cat_feature_indices)
