@@ -18,7 +18,6 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 from sklearn.feature_selection import mutual_info_classif
-from sklearn.linear_model import LogisticRegression
 warnings.filterwarnings('ignore')
 
 # Small, sklearn-only search spaces per model (no optuna - agent sandbox has no internet)
@@ -349,16 +348,21 @@ def main():
     model_scores = {}
     trained_models = {}
 
+    # 'ensemble' is pruned to cb (consistently the strongest model by a wide margin) plus
+    # et and xgb (the best-performing diverse alternatives - a bagging model and a
+    # differently-regularized booster). rf/lgbm/gb are consistently the weakest and most
+    # redundant with the others, so they're dropped from the default ensemble but remain
+    # available individually via --experiment for comparison.
     models_to_train = []
-    if experiment in ('rf', 'ensemble'):
+    if experiment == 'rf':
         models_to_train.append(('rf', 'rf'))
     if experiment in ('et', 'ensemble'):
         models_to_train.append(('et', 'et'))
     if experiment in ('xgb', 'ensemble'):
         models_to_train.append(('xgb', 'xgb'))
-    if experiment in ('lgbm', 'ensemble'):
+    if experiment == 'lgbm':
         models_to_train.append(('lgbm', 'lgbm'))
-    if experiment in ('gb', 'ensemble'):
+    if experiment == 'gb':
         models_to_train.append(('gb', 'gb'))
 
     # Get categorical feature indices for CatBoost, relative to cb_X_train (which keeps
@@ -461,60 +465,28 @@ def main():
                 predictions[model_ids.index(best_name)] = tuned_pred
                 model_scores[best_name] = search.best_score_
 
-    # Stacking ensemble with meta-learner
-    if len(predictions) >= 3:
-        stacking_preds = []
-        for name, key in models_to_train:
-            if name in model_scores:
-                oof_preds = get_oof_predictions(name, X_for(name), y, cat_feature_indices)
-                stacking_preds.append(oof_preds)
+    # Ensemble blend: OOF-optimized non-negative weights instead of a stacking
+    # meta-learner plus an ad hoc fixed blend weight. With the ensemble pruned to
+    # cb/et/xgb (each genuinely different: native-categorical boosting, bagging, and a
+    # differently-regularized booster), a simple weighted average tuned on real
+    # out-of-fold performance is more transparent than a learned meta-model and avoids
+    # guessing a blend ratio - each model's OOF contribution decides its own weight.
+    if len(predictions) >= 2:
+        oof_preds = [get_oof_predictions(name, X_for(name), y, cat_feature_indices)
+                     for name, key in models_to_train if name in model_scores]
+        oof_matrix = np.column_stack(oof_preds)
 
-        if len(stacking_preds) >= 3:
-            meta_X = np.column_stack(stacking_preds)
-            meta_learner = LogisticRegression(max_iter=1000, random_state=42)
-            meta_learner.fit(meta_X, y)
+        from scipy.optimize import nnls
+        weights, _ = nnls(oof_matrix, y.astype(float))
+        weights = weights / weights.sum() if weights.sum() > 0 else np.ones(len(weights)) / len(weights)
 
-            test_preds = []
-            for name, key in models_to_train:
-                if name in model_scores:
-                    model = trained_models.get(name) or get_model(name, n_samples, cat_feature_indices)
-                    if model:
-                        if name not in trained_models:
-                            model.fit(X_for(name), y)
-                            trained_models[name] = model
-                        test_preds.append(model.predict_proba(Xt_for(name))[:, 1])
+        names = [name for name, key in models_to_train if name in model_scores]
+        oof_blend_auc = roc_auc_score(y, oof_matrix @ weights)
+        print(f"OOF-weighted blend: {dict(zip(names, weights.round(3)))}, OOF AUC={oof_blend_auc:.4f}")
 
-            if test_preds:
-                test_meta_X = np.column_stack(test_preds[:len(stacking_preds)])
-                stacking_pred = meta_learner.predict_proba(test_meta_X)[:, 1]
-
-                best_model = list(model_scores.keys())[0] if not model_scores else max(model_scores, key=model_scores.get)
-                best_idx = list(model_scores.keys()).index(best_model)
-                best_pred = predictions[best_idx] if best_idx < len(predictions) else predictions[0]
-
-                blending_weight = 0.6
-                final_pred = blending_weight * stacking_pred + (1 - blending_weight) * best_pred
-
-                pd.DataFrame({'row_id': test['row_id'], 'target': final_pred}).to_csv('final_submission.csv', index=False)
-                print(f"Saved final_submission.csv (stacking blend, {len(predictions)} models)")
-            else:
-                weights = [1.0/np.var(p) for p in predictions]
-                weights = [w/sum(weights) for w in weights]
-                ensemble = np.average(predictions, axis=0, weights=weights)
-                pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-                print(f"Saved final_submission.csv ({len(predictions)} models, variance-weighted)")
-        else:
-            weights = [1.0/np.var(p) for p in predictions]
-            weights = [w/sum(weights) for w in weights]
-            ensemble = np.average(predictions, axis=0, weights=weights)
-            pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-            print(f"Saved final_submission.csv ({len(predictions)} models, variance-weighted)")
-    elif len(predictions) > 1:
-        weights = [1.0/np.var(p) for p in predictions]
-        weights = [w/sum(weights) for w in weights]
-        ensemble = np.average(predictions, axis=0, weights=weights)
-        pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
-        print(f"Saved final_submission.csv ({len(predictions)} models, variance-weighted)")
+        final_pred = np.column_stack(predictions) @ weights
+        pd.DataFrame({'row_id': test['row_id'], 'target': final_pred}).to_csv('final_submission.csv', index=False)
+        print(f"Saved final_submission.csv (OOF-weighted blend, {len(predictions)} models)")
     else:
         pd.DataFrame({'row_id': test['row_id'], 'target': predictions[0]}).to_csv('final_submission.csv', index=False)
         print(f"Saved final_submission.csv (1 model)")
