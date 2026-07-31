@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""
+AutoML training script for AAP competition.
+Supports multiple experiment modes via --experiment argument.
+"""
+
+import sys, pandas as pd, numpy as np, warnings
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+from sklearn.metrics import roc_auc_score
+warnings.filterwarnings('ignore')
+
+# Parse experiment mode
+experiment = 'ensemble'
+if '--experiment' in sys.argv:
+    idx = sys.argv.index('--experiment')
+    if idx + 1 < len(sys.argv):
+        experiment = sys.argv[idx + 1]
+
+train = pd.read_csv('train.csv'); test = pd.read_csv('test.csv')
+cat_cols = [c for c in train.columns if train[c].dtype == 'object' and c.startswith('feature_')]
+y = train['target'].values
+X_train = train.drop(columns=['row_id', 'target']); X_test = test.drop(columns=['row_id'])
+
+# Impute
+for col in X_train.columns:
+    if X_train[col].dtype == 'object':
+        X_train[col] = X_train[col].fillna('missing')
+        X_test[col] = X_test[col].fillna('missing')
+    else:
+        X_train[col] = X_train[col].fillna(X_train[col].median())
+        X_test[col] = X_test[col].fillna(X_train[col].median())
+
+# Encode categoricals
+for col in cat_cols:
+    le = LabelEncoder()
+    le.fit(pd.concat([X_train[col], X_test[col]]).astype(str))
+    X_train[col] = le.transform(X_train[col].astype(str))
+    X_test[col] = le.transform(X_test[col].astype(str))
+
+# Split for internal validation
+X_tr, X_val, y_tr, y_val = train_test_split(X_train, y, test_size=0.2, random_state=42, stratify=y)
+
+def get_model(name, n_samples):
+    n_est = 200 if n_samples < 5000 else 300
+    if name == 'rf':
+        return RandomForestClassifier(n_estimators=n_est, max_depth=8, min_samples_split=5, random_state=42, n_jobs=-1)
+    if name == 'et':
+        return ExtraTreesClassifier(n_estimators=n_est, max_depth=10, random_state=42, n_jobs=-1)
+    if name == 'xgb':
+        from xgboost import XGBClassifier
+        return XGBClassifier(n_estimators=n_est, max_depth=5, learning_rate=0.1, random_state=42, n_jobs=-1)
+    if name == 'lgbm':
+        from lightgbm import LGBMClassifier
+        return LGBMClassifier(n_estimators=n_est, max_depth=8, learning_rate=0.1, random_state=42, n_jobs=-1)
+    if name == 'cb' and cat_cols:
+        from catboost import CatBoostClassifier
+        cat_idx = [list(X_train.columns).index(c) for c in cat_cols]
+        return CatBoostClassifier(iterations=150, depth=6, learning_rate=0.1, cat_features=cat_idx, verbose=False, random_state=42)
+    return None
+
+n_samples = len(train)
+predictions = []
+
+if experiment in ('rf', 'ensemble'):
+    rf = get_model('rf', n_samples)
+    rf.fit(X_train, y)
+    predictions.append(rf.predict_proba(X_test)[:, 1])
+    pd.DataFrame({'row_id': test['row_id'], 'target': predictions[-1]}).to_csv(f'{experiment}_rf.csv', index=False)
+
+if experiment in ('et', 'ensemble'):
+    et = get_model('et', n_samples)
+    et.fit(X_train, y)
+    predictions.append(et.predict_proba(X_test)[:, 1])
+    pd.DataFrame({'row_id': test['row_id'], 'target': predictions[-1]}).to_csv(f'{experiment}_et.csv', index=False)
+
+if experiment in ('xgb', 'ensemble'):
+    try:
+        xgb = get_model('xgb', n_samples)
+        xgb.fit(X_train, y)
+        predictions.append(xgb.predict_proba(X_test)[:, 1])
+        pd.DataFrame({'row_id': test['row_id'], 'target': predictions[-1]}).to_csv(f'{experiment}_xgb.csv', index=False)
+    except: pass
+
+if experiment in ('lgbm', 'ensemble'):
+    try:
+        lgbm = get_model('lgbm', n_samples)
+        lgbm.fit(X_train, y)
+        predictions.append(lgbm.predict_proba(X_test)[:, 1])
+        pd.DataFrame({'row_id': test['row_id'], 'target': predictions[-1]}).to_csv(f'{experiment}_lgbm.csv', index=False)
+    except: pass
+
+if experiment in ('cb', 'ensemble') and cat_cols:
+    try:
+        cb = get_model('cb', n_samples)
+        cb.fit(X_train, y)
+        predictions.append(cb.predict_proba(X_test)[:, 1])
+        pd.DataFrame({'row_id': test['row_id'], 'target': predictions[-1]}).to_csv(f'{experiment}_cb.csv', index=False)
+    except: pass
+
+# Final ensemble
+if predictions:
+    if len(predictions) > 1:
+        weights = [1.0/p.var() for p in predictions]
+        weights = [w/sum(weights) for w in weights]
+        ensemble = np.average(predictions, axis=0, weights=weights)
+    else:
+        ensemble = predictions[0]
+    pd.DataFrame({'row_id': test['row_id'], 'target': ensemble}).to_csv('final_submission.csv', index=False)
+    print(f"Saved final_submission.csv ({len(predictions)} models)")
