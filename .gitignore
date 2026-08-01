@@ -31,3 +31,15 @@ Thumbs.db
 # Generated logs (e.g. Kaggle kernel run logs) - would also break agent submission
 # validation if left inside submission/ (disallowed file extension)
 *.log
+
+# Generated submission artifacts
+**/final_submission.csv
+**/small_submission.csv
+**/*_pred.csv
+submission.zip
+*.zip
+
+# Stale old experiment directories
+submissions/
+docs/
+minimal_submission/

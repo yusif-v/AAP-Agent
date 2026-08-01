@@ -9,6 +9,7 @@ Your objective is to maximize predictive performance evaluated by **{metric_name
 ## Environment & Data
 You operate inside an offline Linux container pre-installed with standard ML libraries (pandas, scikit-learn, xgboost, lightgbm, catboost). There is no internet access.
 The working directory contains `train.csv`, `test.csv`, and `sample_submission.csv`.
+Your bundled skills are available under `skills/` (e.g. `python skills/model_training/scripts/train_automl.py`). Run that script directly — do not copy the script to the working directory first.
 
 ## Execution Budget & Limits
 - Max Submissions: {max_submissions}
@@ -19,9 +20,9 @@ The working directory contains `train.csv`, `test.csv`, and `sample_submission.c
 ## Experiment Tracking Table
 Track all experiments in a markdown table format:
 ```
-| Experiment | Model(s) | CV Score | Submission ID | Score |
-|------------|----------|----------|---------------|-------|
-| baseline   | RF       | 0.75     | sub_123       | 0.76  |
+|| Experiment | Model(s) | CV Score | Submission ID | Score |
+||------------|----------|----------|---------------|-------|
+|| baseline   | RF       | 0.75     | sub_123       | 0.76  |
 ```
 
 ## Adaptive Strategy
@@ -44,7 +45,7 @@ Execute this loop until budget/time runs low:
 ### Phase 1: Baseline & Exploration (first ~15% of budget)
 1. Check data size and features:
    `run_command("python -c 'import pandas as pd; df=pd.read_csv(\"train.csv\"); print(f\"Shape: {df.shape}\"); print(f\"Categorical: {[c for c in df.columns if df[c].dtype==\"object\" and c.startswith(\"feature_\")]}\")'")`
-2. Run baseline training: `run_command("python scripts/train_automl.py --experiment rf")`
+2. Run baseline training: `run_command("python skills/model_training/scripts/train_automl.py --experiment rf")`
 3. Submit baseline: `submit_predictions("final_submission.csv")`
 4. Record submission ID and score in tracking table
 5. Check `get_status()` to monitor budget
@@ -52,16 +53,16 @@ Execute this loop until budget/time runs low:
 ### Phase 2: Model Experiments (next ~50% of budget)
 For each experiment, train, submit, and track scores:
 - **Experiment A**: XGBoost only → submit → record
-- **Experiment B**: LightGBM only → submit → record  
+- **Experiment B**: LightGBM only → submit → record
 - **Experiment C**: CatBoost only (if categorical features exist) → submit → record
 - **Experiment D**: ExtraTrees + RF ensemble → submit → record
-- **Experiment E**: Full 6-model ensemble (`--experiment ensemble`) → submit → record
+- **Experiment E**: Full ensemble (`--experiment ensemble`) → submit → record
 
 After each: call `get_status()` to monitor budget
 
 ### Phase 3: Hyperparameter Tuning (next ~25% of budget)
 For the best-performing model from Phase 2:
-- Re-run with `--tune` appended (e.g. `run_command("python scripts/train_automl.py --experiment ensemble --tune")`)
+- Re-run with `--tune` appended (e.g. `run_command("python skills/model_training/scripts/train_automl.py --experiment ensemble --tune")`)
   to run a sklearn RandomizedSearchCV pass on the top model — no internet/optuna needed or available
 - Use cross-validation within training script
 - Submit best tuned model → record score
@@ -81,6 +82,7 @@ For the best-performing model from Phase 2:
 - Use `write_file` to create scripts, `run_command` to execute
 - Always check `get_status()` after submissions
 - Never exceed submission limit; reserve 2 for final selection
+- Your bundled skill scripts are at `skills/<skill_name>/scripts/` — call them there, never at the working-directory root
 
 ## Start Now
 Begin with Phase 1: explore data, run baseline, submit.
