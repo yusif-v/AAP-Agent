@@ -86,10 +86,10 @@ def get_adaptive_params(n_samples):
         return dict(n_seeds=3, cb_iterations=1500, cb_depth=6, cb_lr=0.03,
                     xgb_n_est=500, xgb_depth=4, xgb_lr=0.03, et_n_est=300, et_depth=8)
     else:
-        # Large datasets (>=10k rows) — 2 CB seeds sufficient here (diminishing returns
-        # beyond 2 seeds, and 5 seeds on 50k rows causes memory pressure on Kaggle)
-        return dict(n_seeds=2, cb_iterations=2000, cb_depth=6, cb_lr=0.03,
-                    xgb_n_est=2000, xgb_depth=4, xgb_lr=0.03, et_n_est=300, et_depth=10)
+        # Large datasets (>=10k rows) — 1 CB seed to avoid memory exhaustion
+        # on Kaggle (segfault on split 14 after processing 50k-row split 12)
+        return dict(n_seeds=1, cb_iterations=1000, cb_depth=6, cb_lr=0.05,
+                    xgb_n_est=500, xgb_depth=5, xgb_lr=0.05, et_n_est=200, et_depth=8)
 
 
 # --- Data loading ---
@@ -255,6 +255,8 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
             pred = model.predict_proba(X_df.iloc[val_idx])[:, 1]
             model_oof[val_idx] = pred
             scores.append(roc_auc_score(y[val_idx], pred))
+            del model
+            gc.collect()
         return np.mean(scores), model_oof
 
     def X_for(name):
@@ -292,6 +294,9 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
             pred = model.predict_proba(Xt_for(name))[:, 1]
             predictions.append(pred)
             model_ids.append(name)
+            # Explicitly release model memory before next model
+            del model
+            gc.collect()
         except Exception as e:
             print(f"  {name}: Failed - {e}")
             continue
