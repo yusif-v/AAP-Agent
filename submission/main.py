@@ -3,12 +3,16 @@
 Entry point for Kaggle AAP Agent submission.
 Runs the 4-model ensemble pipeline (CatBoost/ExtraTrees/XGBoost/LogisticRegression)
 across all 16 data splits and writes a combined final_submission.csv.
+
+Each split is processed in a subprocess to isolate memory and prevent
+segfaults from memory accumulation across 16 splits.
 """
 
-import gc
 import sys
 import os
+import gc
 import glob
+import subprocess
 import shutil as _shutil
 import pandas as pd
 import numpy as np
@@ -16,6 +20,8 @@ import warnings
 import itertools
 import re
 import zipfile
+import tempfile
+import json
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import ExtraTreesClassifier
@@ -312,10 +318,10 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
         else:
             weights = np.ones(len(weights)) / len(weights)
 
-        # Conditional soft floor: if top-2 OOF models within 0.01 AUC, hedge
+        # Conditional soft floor: if top-2 OOF models within 0.005 AUC, hedge
         oof_aucs = list(roc_auc_score(y, oof_matrix[:, i]) for i in range(len(names)))
         sorted_idx = np.argsort(-np.array(oof_aucs))
-        if len(sorted_idx) >= 2 and (oof_aucs[sorted_idx[0]] - oof_aucs[sorted_idx[1]]) < 0.01:
+        if len(sorted_idx) >= 2 and (oof_aucs[sorted_idx[0]] - oof_aucs[sorted_idx[1]]) < 0.005:
             for idx in sorted_idx[:2]:
                 if weights[idx] < 0.10:
                     weights[idx] = 0.10
@@ -330,6 +336,57 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
     else:
         print(f"  Single model: {model_ids[0]}")
         return test_row_ids, predictions[0]
+
+
+def process_split_subprocess(split_dir, experiment):
+    """Process one split in a subprocess and return (row_ids, predictions).
+
+    Using a subprocess ensures all memory (CatBoost models, etc.) is released
+    when the process exits, preventing accumulation across 16 splits.
+    """
+    # Write a small runner script
+    runner_code = f"""
+import sys, os, json, pickle
+sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})
+import pandas as pd
+import numpy as np
+
+from main import train_and_predict
+
+split_dir = {split_dir!r}
+experiment = {experiment!r}
+
+train = pd.read_csv(os.path.join(split_dir, 'train.csv'))
+test = pd.read_csv(os.path.join(split_dir, 'test.csv'))
+
+row_ids, preds = train_and_predict(train, test, experiment=experiment)
+print(f"  Loaded train={{train.shape}}, test={{test.shape}}")
+
+# Save results via stdout (JSON)
+result = {{
+    'row_ids': row_ids.tolist(),
+    'preds': preds.tolist(),
+}}
+import json
+print('RESULT_JSON_START' + json.dumps(result) + 'RESULT_JSON_END')
+"""
+
+    result = subprocess.run(
+        [sys.executable, '-c', runner_code],
+        capture_output=True, text=True, timeout=600
+    )
+
+    # Extract JSON result from stdout
+    stdout = result.stdout
+    start = stdout.find('RESULT_JSON_START')
+    end = stdout.find('RESULT_JSON_END')
+    if start == -1 or end == -1:
+        print(f"  Subprocess failed: {result.stderr[-500:]}")
+        return None, None
+
+    result_json = stdout[start + len('RESULT_JSON_START'):end]
+    data = json.loads(result_json)
+    return data['row_ids'], data['preds']
 
 
 def main():
@@ -355,14 +412,18 @@ def main():
 
     for i, split_dir in enumerate(data_dirs):
         print(f"\n[{i+1}/{len(data_dirs)}] Processing {split_dir}...")
+
         train = pd.read_csv(os.path.join(split_dir, 'train.csv'))
         test = pd.read_csv(os.path.join(split_dir, 'test.csv'))
         print(f"  Loaded train={train.shape}, test={test.shape}")
 
-        row_ids, preds = train_and_predict(train, test, experiment=experiment)
-        all_row_ids.extend(row_ids.tolist())
-        all_preds.extend(preds.tolist())
-        # Free memory between splits to prevent accumulation
+        row_ids, preds = process_split_subprocess(split_dir, experiment)
+        if row_ids is None:
+            print(f"  FAILED for {split_dir}")
+            continue
+
+        all_row_ids.extend(row_ids)
+        all_preds.extend(preds)
         del train, test, row_ids, preds
         gc.collect()
 
