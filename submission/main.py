@@ -95,7 +95,9 @@ def find_data_dirs():
     search_paths = [
         '/kaggle/input/autonomous-agent-prediction-beta/train_*',
         '/kaggle/input/autonomous-agent-prediction-beta/data/train_*',
+        '/kaggle/input/autonomous-agent-prediction-beta/*/train_*',
         'data/train_*',
+        'data/*/train_*',
         'train_*',
     ]
     for pattern in search_paths:
@@ -121,6 +123,18 @@ def download_data():
             with zipfile.ZipFile(zf, 'r') as zip_ref:
                 zip_ref.extractall('data')
             os.remove(zf)
+        # If the zip extracted into a nested directory, flatten it
+        nested = glob.glob('data/*/train_01')
+        if not nested:
+            nested_dirs = glob.glob('data/autonomous-agent-prediction-beta')
+            if nested_dirs:
+                # Move all train_* dirs up one level
+                for item in os.listdir(nested_dirs[0]):
+                    s = os.path.join(nested_dirs[0], item)
+                    d = os.path.join('data', item)
+                    if os.path.isdir(s) and item.startswith('train_'):
+                        import shutil
+                        shutil.move(s, d)
         return True
     except Exception as e:
         print(f"Download failed: {e}")
