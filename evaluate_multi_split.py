@@ -21,7 +21,7 @@ from sklearn.metrics import roc_auc_score
 REPO = Path(__file__).resolve().parent
 TRAIN_SCRIPT = REPO / "submission/skills/model-training/scripts/train_automl.py"
 DATA_DIR = REPO / "data"
-PYTHON = REPO / ".venv/bin/python3"
+PYTHON = "/usr/bin/python3"
 
 
 def run_split(split_dir, extra_args):
@@ -30,7 +30,7 @@ def run_split(split_dir, extra_args):
         shutil.copy(split_dir / "train.csv", tmp / "train.csv")
         shutil.copy(split_dir / "test.csv", tmp / "test.csv")
         cmd = [str(PYTHON), str(TRAIN_SCRIPT)] + extra_args
-        result = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True)
+        result = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             print(f"  FAILED: {result.stderr[-2000:]}")
             return None
