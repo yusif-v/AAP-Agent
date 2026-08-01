@@ -86,10 +86,9 @@ def get_adaptive_params(n_samples):
         return dict(n_seeds=3, cb_iterations=1500, cb_depth=6, cb_lr=0.03,
                     xgb_n_est=500, xgb_depth=4, xgb_lr=0.03, et_n_est=300, et_depth=8)
     else:
-        # Large datasets (>=10k rows) — 1 CB seed to avoid memory exhaustion
-        # on Kaggle (segfault on split 14 after processing 50k-row split 12)
-        return dict(n_seeds=1, cb_iterations=1000, cb_depth=6, cb_lr=0.05,
-                    xgb_n_est=500, xgb_depth=5, xgb_lr=0.05, et_n_est=200, et_depth=8)
+        # Large datasets (>=10k rows) — minimize memory to avoid Kaggle segfault
+        return dict(n_seeds=1, cb_iterations=500, cb_depth=6, cb_lr=0.1,
+                    xgb_n_est=200, xgb_depth=5, xgb_lr=0.1, et_n_est=200, et_depth=6)
 
 
 # --- Data loading ---
@@ -225,7 +224,8 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
 
     n_samples = len(train_df)
     adaptive = get_adaptive_params(n_samples)
-    n_folds = min(5, 3) if n_samples < 2000 else 5
+    # Use 3 CV folds for large datasets, 5 for small (reduces memory on 50k-row splits)
+    n_folds = 5 if n_samples < 5000 else 3
     cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
 
     cat_feature_indices = [cb_X_train.columns.get_loc(c) for c in cat_cols] if cat_cols else []
@@ -244,7 +244,8 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
             cb_seeds = (42, 142, 242, 342, 442)[:adaptive['n_seeds']]
             return SeedAveragedCatBoost(cat_features=cat_feature_indices, seeds=cb_seeds,
                                        iterations=adaptive['cb_iterations'], depth=adaptive['cb_depth'],
-                                       learning_rate=adaptive['cb_lr'])
+                                       learning_rate=adaptive['cb_lr'],
+                                       thread_count=4, allow_writing_files=False)
 
     def get_cv_and_oof(name, X_df):
         model_oof = np.zeros(n_samples)
@@ -362,8 +363,8 @@ def main():
         all_row_ids.extend(row_ids.tolist())
         all_preds.extend(preds.tolist())
         # Free memory between splits to prevent accumulation
+        del train, test, row_ids, preds
         gc.collect()
-        del train, test
 
     print(f"\nCombined submission: {len(all_row_ids)} rows")
     submission = pd.DataFrame({'row_id': all_row_ids, 'target': all_preds})
