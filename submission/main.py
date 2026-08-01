@@ -251,7 +251,7 @@ def train_and_predict(train_df, test_df, experiment='ensemble', cat_features=Non
             return SeedAveragedCatBoost(cat_features=cat_feature_indices, seeds=cb_seeds,
                                        iterations=adaptive['cb_iterations'], depth=adaptive['cb_depth'],
                                        learning_rate=adaptive['cb_lr'],
-                                       thread_count=4, allow_writing_files=False)
+                                       thread_count=2, allow_writing_files=False, save_snapshot=False)
 
     def get_cv_and_oof(name, X_df):
         model_oof = np.zeros(n_samples)
@@ -485,7 +485,7 @@ def get_model(name):
         cb_seeds = (42, 142, 242, 342, 442)[:adaptive['n_seeds']]
         return SeedAveragedCatBoost(cat_features=cat_feature_indices, seeds=cb_seeds,
                                    iterations=adaptive['cb_iterations'], depth=adaptive['cb_depth'],
-                                   learning_rate=adaptive['cb_lr'], thread_count=4, allow_writing_files=False)
+                                   learning_rate=adaptive['cb_lr'], thread_count=2, allow_writing_files=False, save_snapshot=False)
 
 models_to_train = ['et', 'xgb', 'lr', 'cb'] if experiment == 'ensemble' else [experiment]
 oof_cache = {{}}
