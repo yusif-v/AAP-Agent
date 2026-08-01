@@ -602,10 +602,6 @@ def main():
     for i, split_dir in enumerate(data_dirs):
         print(f"\n[{i+1}/{len(data_dirs)}] Processing {split_dir}...")
 
-        train = pd.read_csv(os.path.join(split_dir, 'train.csv'))
-        test = pd.read_csv(os.path.join(split_dir, 'test.csv'))
-        print(f"  Loaded train={train.shape}, test={test.shape}")
-
         row_ids, preds = process_split_subprocess(split_dir, experiment)
         if row_ids is None:
             print(f"  FAILED for {split_dir}")
@@ -613,7 +609,6 @@ def main():
 
         all_row_ids.extend(row_ids)
         all_preds.extend(preds)
-        del train, test, row_ids, preds
         gc.collect()
 
     print(f"\nCombined submission: {len(all_row_ids)} rows")
