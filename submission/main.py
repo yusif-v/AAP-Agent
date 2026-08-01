@@ -5,9 +5,11 @@ Runs the 4-model ensemble pipeline (CatBoost/ExtraTrees/XGBoost/LogisticRegressi
 across all 16 data splits and writes a combined final_submission.csv.
 """
 
+import gc
 import sys
 import os
 import glob
+import shutil as _shutil
 import pandas as pd
 import numpy as np
 import warnings
@@ -84,7 +86,9 @@ def get_adaptive_params(n_samples):
         return dict(n_seeds=3, cb_iterations=1500, cb_depth=6, cb_lr=0.03,
                     xgb_n_est=500, xgb_depth=4, xgb_lr=0.03, et_n_est=300, et_depth=8)
     else:
-        return dict(n_seeds=3, cb_iterations=2000, cb_depth=6, cb_lr=0.03,
+        # Large datasets (>=10k rows) — 2 CB seeds sufficient here (diminishing returns
+        # beyond 2 seeds, and 5 seeds on 50k rows causes memory pressure on Kaggle)
+        return dict(n_seeds=2, cb_iterations=2000, cb_depth=6, cb_lr=0.03,
                     xgb_n_est=2000, xgb_depth=4, xgb_lr=0.03, et_n_est=300, et_depth=10)
 
 
@@ -94,7 +98,6 @@ def find_data_dirs():
     """Find all split directories, checking Kaggle input path first."""
     search_paths = [
         '/kaggle/input/autonomous-agent-prediction-beta/train_*',
-        '/kaggle/input/autonomous-agent-prediction-beta/data/train_*',
         '/kaggle/input/autonomous-agent-prediction-beta/*/train_*',
         'data/train_*',
         'data/*/train_*',
@@ -105,6 +108,15 @@ def find_data_dirs():
         if dirs:
             dirs = [d for d in dirs if os.path.isdir(d) and os.path.exists(os.path.join(d, 'train.csv'))]
             if dirs:
+                # If we got paths with double 'data' (e.g. data/data/train_*),
+                # that means the Kaggle zip extraction created nested dirs.
+                # Return the deepest valid ones.
+                if len(dirs) < 16 and os.path.exists('data/data'):
+                    # Try the deeper path
+                    deeper = sorted(glob.glob('data/*/train_*'))
+                    deeper = [d for d in deeper if os.path.isdir(d) and os.path.exists(os.path.join(d, 'train.csv'))]
+                    if deeper:
+                        return deeper
                 return dirs
     return []
 
@@ -114,27 +126,28 @@ def download_data():
     print("Attempting to download competition data...")
     try:
         import kaggle
-        os.makedirs('data', exist_ok=True)
         print("Downloading...")
         kaggle.api.competition_download_files('autonomous-agent-prediction-beta', path='.', force=True, quiet=False)
         zip_files = glob.glob('*.zip')
         for zf in zip_files:
             print(f"Unzipping {zf}...")
             with zipfile.ZipFile(zf, 'r') as zip_ref:
-                zip_ref.extractall('data')
+                zip_ref.extractall('.')
             os.remove(zf)
-        # If the zip extracted into a nested directory, flatten it
-        nested = glob.glob('data/*/train_01')
-        if not nested:
-            nested_dirs = glob.glob('data/autonomous-agent-prediction-beta')
-            if nested_dirs:
-                # Move all train_* dirs up one level
-                for item in os.listdir(nested_dirs[0]):
-                    s = os.path.join(nested_dirs[0], item)
-                    d = os.path.join('data', item)
-                    if os.path.isdir(s) and item.startswith('train_'):
-                        import shutil
-                        shutil.move(s, d)
+        # The zip extracts to data/autonomous-agent-prediction-beta/train_*
+        # Move train_* dirs up to data/ for consistency
+        nested = glob.glob('data/autonomous-agent-prediction-beta/train_*')
+        if nested:
+            for d in sorted(nested):
+                s = d
+                dst_name = os.path.basename(d)
+                d2 = os.path.join('data', dst_name)
+                if os.path.isdir(s):
+                    _shutil.move(s, d2)
+            # Clean up the now-empty nested directory
+            nested_parent = 'data/autonomous-agent-prediction-beta'
+            if os.path.isdir(nested_parent) and not os.listdir(nested_parent):
+                _shutil.rmtree(nested_parent)
         return True
     except Exception as e:
         print(f"Download failed: {e}")
@@ -343,6 +356,9 @@ def main():
         row_ids, preds = train_and_predict(train, test, experiment=experiment)
         all_row_ids.extend(row_ids.tolist())
         all_preds.extend(preds.tolist())
+        # Free memory between splits to prevent accumulation
+        gc.collect()
+        del train, test
 
     print(f"\nCombined submission: {len(all_row_ids)} rows")
     submission = pd.DataFrame({'row_id': all_row_ids, 'target': all_preds})
