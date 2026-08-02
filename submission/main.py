@@ -5,8 +5,7 @@ Runs the 4-model ensemble pipeline (CatBoost/ExtraTrees/XGBoost/LogisticRegressi
 across all 16 data splits and writes a combined final_submission.csv.
 
 Each split is processed in a subprocess to isolate memory and prevent
-segfaults from accumulation across 16 splits. If a subprocess segfaults,
-retries with progressively simpler model sets (no CatBoost, then sklearn-only).
+segfaults from accumulation across 16 splits.
 """
 
 import sys
@@ -147,201 +146,596 @@ def download_data():
         return False
 
 
-def process_split(split_dir, experiment):
-    """Process one split in a subprocess and return (row_ids, predictions).
+# --- Subprocess runner: full ensemble (ET+XGB+LR+CB) ---
+# Uses a temp file approach to avoid f-string escaping issues.
 
-    Uses os.fork() for memory isolation. If the child segfaults, the parent
-    catches the signal and returns None, then tries fallback strategies.
-    """
-    # Create a pipe for child to send results back
-    read_fd, write_fd = os.pipe()
+def _write_and_run(runner_code, split_dir, experiment, suffix):
+    """Write runner_code to a temp file and execute it as a subprocess."""
+    runner_path = os.path.join(tempfile.gettempdir(), f'split_runner_{os.getpid()}_{id(split_dir)}_{suffix}.py')
+    with open(runner_path, 'w') as f:
+        f.write(runner_code)
 
-    pid = os.fork()
-
-    if pid == 0:
-        # Child process — redirect stdout to /dev/null, write result to pipe
-        os.close(read_fd)
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 1)  # Redirect stdout
-        os.dup2(devnull, 2)  # Redirect stderr
-
-        try:
-            train_df = pd.read_csv(os.path.join(split_dir, 'train.csv'))
-            test_df = pd.read_csv(os.path.join(split_dir, 'test.csv'))
-
-            raw_cat_cols = [c for c in train_df.columns
-                            if (pd.api.types.is_object_dtype(train_df[c]) or pd.api.types.is_string_dtype(train_df[c]))
-                            and c.startswith('feature_')]
-            ORDINAL_RE = re.compile(r'^ord_(\d+)$')
-            ordinal_cols = [c for c in raw_cat_cols
-                            if train_df[c].dropna().astype(str).str.match(ORDINAL_RE).all()]
-            cat_cols = [c for c in raw_cat_cols if c not in ordinal_cols]
-            num_cols = [c for c in train_df.columns if c not in cat_cols and c not in ['row_id', 'target']]
-
-            y = train_df['target'].values
-            X_train = train_df.drop(columns=['row_id', 'target']).copy()
-            X_test = test_df.drop(columns=['row_id']).copy()
-            test_row_ids = test_df['row_id'].copy()
-
-            del train_df, test_df
-
-            for col in ordinal_cols:
-                X_train[col] = X_train[col].str.extract(r'(\d+)$', expand=False).astype(float)
-                X_test[col] = X_test[col].str.extract(r'(\d+)$', expand=False).astype(float)
-
-            for col in X_train.columns:
-                if pd.api.types.is_object_dtype(X_train[col]) or pd.api.types.is_string_dtype(X_train[col]):
-                    X_train[col] = X_train[col].fillna('missing')
-                    X_test[col] = X_test[col].fillna('missing')
-                else:
-                    med = X_train[col].median()
-                    X_train[col] = X_train[col].fillna(med)
-                    X_test[col] = X_test[col].fillna(med)
-
-            for col in num_cols:
-                if col in X_train.columns:
-                    lower, upper = X_train[col].quantile([0.01, 0.99])
-                    X_train[col] = X_train[col].clip(lower, upper)
-                    X_test[col] = X_test[col].clip(lower, upper)
-
-            cb_X_train = X_train.copy()
-            cb_X_test = X_test.copy()
-
-            te_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-            global_mean = y.mean()
-            for col in cat_cols:
-                oof_te = np.zeros(len(X_train))
-                for tr_idx, val_idx in te_cv.split(X_train, y):
-                    fold_means = pd.Series(y[tr_idx]).groupby(X_train[col].iloc[tr_idx].values).mean()
-                    oof_te[val_idx] = X_train[col].iloc[val_idx].map(fold_means).fillna(global_mean).values
-                X_train[col + '_te'] = oof_te
-                full_means = pd.Series(y).groupby(X_train[col].values).mean()
-                X_test[col + '_te'] = X_test[col].map(full_means).fillna(global_mean)
-
-            X_train = X_train.drop(columns=cat_cols)
-            X_test = X_test.drop(columns=cat_cols)
-
-            if num_cols:
-                num_mi = mutual_info_classif(X_train[num_cols], y, random_state=42)
-                top_num_cols = pd.Series(num_mi, index=num_cols).nlargest(min(5, len(num_cols))).index.tolist()
-                for col1, col2 in itertools.combinations(top_num_cols, 2):
-                    if col1 in X_train.columns and col2 in X_train.columns:
-                        X_train[f"{col1}_{col2}_mul"] = (X_train[col1] * X_train[col2]).astype(float)
-                        X_test[f"{col1}_{col2}_mul"] = (X_test[col1] * X_test[col2]).astype(float)
-
-            n_samples = len(y)
-            adaptive = get_adaptive_params(n_samples)
-            n_folds = 5 if n_samples < 5000 else 3
-            cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-            cat_feature_indices = [cb_X_train.columns.get_loc(c) for c in cat_cols] if cat_cols else []
-
-            def get_model(name):
-                if name == 'et':
-                    return ExtraTreesClassifier(n_estimators=int(adaptive['et_n_est']), max_depth=int(adaptive['et_depth']),
-                                                random_state=42, n_jobs=2)
-                if name == 'xgb':
-                    return EarlyStoppingXGB(n_estimators=int(adaptive['xgb_n_est']), max_depth=int(adaptive['xgb_depth']),
-                                            learning_rate=adaptive['xgb_lr'], random_state=42, n_jobs=2, verbosity=0)
-                if name == 'lr':
-                    return make_pipeline(StandardScaler(),
-                                         LogisticRegression(max_iter=5000, C=0.1, random_state=42))
-                if name == 'cb':
-                    cb_seeds = (42, 142, 242, 342, 442)[:adaptive['n_seeds']]
-                    return SeedAveragedCatBoost(cat_features=cat_feature_indices, seeds=cb_seeds,
-                                               iterations=int(adaptive['cb_iterations']), depth=int(adaptive['cb_depth']),
-                                               learning_rate=adaptive['cb_lr'],
-                                               thread_count=2, allow_writing_files=False, save_snapshot=False)
-
-            models_to_train = []
-            if experiment == 'ensemble':
-                models_to_train = ['et', 'xgb', 'lr', 'cb']
-            elif experiment == 'no_cb':
-                models_to_train = ['et', 'xgb', 'lr']
-            elif experiment == 'no_xgb':
-                models_to_train = ['et', 'cb']
-
-            oof_cache = {}
-            predictions = []
-            model_ids = []
-
-            for name in models_to_train:
-                try:
-                    X_df = cb_X_train if name == 'cb' else X_train
-                    model_oof = np.zeros(n_samples)
-                    scores = []
-                    for tr_idx, val_idx in cv.split(X_df, y):
-                        model = get_model(name)
-                        model.fit(X_df.iloc[tr_idx], y[tr_idx])
-                        pred = model.predict_proba(X_df.iloc[val_idx])[:, 1]
-                        model_oof[val_idx] = pred
-                        scores.append(roc_auc_score(y[val_idx], pred))
-                        del model
-                        gc.collect()
-                    oof_cache[name] = model_oof
-                    cv_score = np.mean(scores)
-
-                    model = get_model(name)
-                    model.fit(X_df, y)
-                    Xt_df = cb_X_test if name == 'cb' else X_test
-                    pred = model.predict_proba(Xt_df)[:, 1]
-                    predictions.append(pred)
-                    model_ids.append(name)
-                    del model
-                    gc.collect()
-                except Exception as e:
-                    continue
-
-            if len(predictions) >= 2:
-                names = model_ids
-                oof_matrix = np.column_stack([oof_cache[n] for n in names])
-                from scipy.optimize import nnls
-                weights, _ = nnls(oof_matrix, y.astype(float))
-                if weights.sum() > 0:
-                    weights = weights / weights.sum()
-                else:
-                    weights = np.ones(len(weights)) / len(weights)
-                final_pred = np.column_stack(predictions) @ weights
-            elif predictions:
-                final_pred = predictions[0]
-            else:
-                os._exit(1)
-
-            result = {
-                'row_ids': test_row_ids.tolist(),
-                'preds': final_pred.tolist(),
-            }
-            payload = json.dumps(result)
-            os.write(write_fd, payload.encode())
-            os.close(write_fd)
-            os._exit(0)
-        except Exception as e:
-            os.write(write_fd, json.dumps({'error': str(e)}).encode())
-            os.close(write_fd)
-            os._exit(1)
-
-    # Parent process
-    os.close(write_fd)
-    _, status = os.waitpid(pid, 0)
-    exit_code = os.waitstatus_to_exitcode(status)
-
-    if exit_code == 0:
-        # Read result from child
-        data = b''
-        while True:
-            chunk = os.read(read_fd, 65536)
-            if not chunk:
-                break
-            data += chunk
-        os.close(read_fd)
-        if data:
-            result = json.loads(data.decode())
-            if 'error' in result:
-                return None
-            return result['row_ids'], result['preds']
-    else:
-        os.close(read_fd)
-        signal = -exit_code if exit_code < 0 else None
+    try:
+        result = subprocess.run(
+            [sys.executable, runner_path, split_dir, experiment],
+            capture_output=True, text=True, timeout=600,
+            cwd=os.getcwd()
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  Subprocess timed out for {split_dir}")
         return None
+    finally:
+        if os.path.exists(runner_path):
+            os.unlink(runner_path)
+
+    if result.returncode != 0:
+        if result.returncode == -11:
+            print(f"  Subprocess segfaulted (exit -11)")
+        else:
+            stderr_msg = result.stderr[-300:] if result.stderr else "(no stderr)"
+            print(f"  Subprocess failed (exit {result.returncode}): {stderr_msg}")
+        return None
+
+    stdout = result.stdout
+    start = stdout.find('RESULT_JSON_START')
+    end = stdout.find('RESULT_JSON_END')
+    if start == -1 or end == -1:
+        print(f"  No result marker in subprocess output")
+        return None
+
+    result_json = stdout[start + len('RESULT_JSON_START'):end]
+    data = json.loads(result_json)
+    return data['row_ids'], data['preds']
+
+
+# The runner code that executes in a subprocess for each split.
+# Written to a temp file to avoid f-string escaping issues.
+# Supports experiment modes: 'ensemble' (ET+XGB+LR+CB), 'no_cb' (ET+XGB+LR)
+
+RUNNER_CODE = r'''import sys, os, json, warnings, gc
+warnings.filterwarnings("ignore")
+import pandas as pd
+import numpy as np
+import itertools, re
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import roc_auc_score
+from sklearn.feature_selection import mutual_info_classif
+from scipy.optimize import nnls
+from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
+
+class SeedAveragedCatBoost:
+    def __init__(self, cat_features=None, seeds=(42,), iterations=2000, **params):
+        self.cat_features = cat_features
+        self.seeds = seeds
+        self.params = params
+        self.iterations = iterations
+        self.models = []
+    def fit(self, X, y):
+        self.models = []
+        for seed in self.seeds:
+            X_tr, X_es, y_tr, y_es = train_test_split(X, y, test_size=0.15, random_state=seed, stratify=y)
+            model = CatBoostClassifier(cat_features=self.cat_features or None,
+                                       random_state=seed, verbose=False,
+                                       early_stopping_rounds=50, iterations=self.iterations, **self.params)
+            model.fit(X_tr, y_tr, eval_set=(X_es, y_es))
+            self.models.append(model)
+        return self
+    def predict_proba(self, X):
+        return np.mean([m.predict_proba(X) for m in self.models], axis=0)
+
+class EarlyStoppingXGB:
+    def __init__(self, n_estimators=2000, **params):
+        self.params = params
+        self.n_estimators = n_estimators
+        self.model = None
+    def fit(self, X, y):
+        X_tr, X_es, y_tr, y_es = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+        self.model = XGBClassifier(n_estimators=self.n_estimators, early_stopping_rounds=50, **self.params)
+        self.model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+        return self
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+def get_adaptive_params(n):
+    if n < 500:
+        return dict(n_seeds=1, cb_iterations=300, cb_depth=4, cb_lr=0.1, xgb_n_est=100, xgb_depth=3, xgb_lr=0.1, et_n_est=100, et_depth=4)
+    elif n < 2000:
+        return dict(n_seeds=1, cb_iterations=500, cb_depth=5, cb_lr=0.05, xgb_n_est=200, xgb_depth=4, xgb_lr=0.05, et_n_est=200, et_depth=6)
+    elif n < 10000:
+        return dict(n_seeds=1, cb_iterations=500, cb_depth=6, cb_lr=0.03, xgb_n_est=300, xgb_depth=4, xgb_lr=0.03, et_n_est=300, et_depth=8)
+    else:
+        return dict(n_seeds=1, cb_iterations=300, cb_depth=6, cb_lr=0.1, xgb_n_est=200, xgb_depth=5, xgb_lr=0.1, et_n_est=200, et_depth=6)
+
+def get_model(name):
+    if name == 'et':
+        return ExtraTreesClassifier(n_estimators=int(adaptive['et_n_est']), max_depth=int(adaptive['et_depth']),
+                                    random_state=42, n_jobs=2)
+    if name == 'xgb':
+        return EarlyStoppingXGB(n_estimators=int(adaptive['xgb_n_est']), max_depth=int(adaptive['xgb_depth']),
+                                learning_rate=adaptive['xgb_lr'], random_state=42, n_jobs=2, verbosity=0)
+    if name == 'lr':
+        return make_pipeline(StandardScaler(),
+                             LogisticRegression(max_iter=5000, C=0.1, random_state=42))
+    if name == 'cb':
+        cb_seeds = (42, 142, 242, 342, 442)[:adaptive['n_seeds']]
+        return SeedAveragedCatBoost(cat_features=cat_feature_indices, seeds=cb_seeds,
+                                   iterations=int(adaptive['cb_iterations']), depth=int(adaptive['cb_depth']),
+                                   learning_rate=adaptive['cb_lr'],
+                                   thread_count=2, allow_writing_files=False, save_snapshot=False)
+
+split_dir = sys.argv[1]
+experiment = sys.argv[2]
+
+train = pd.read_csv(os.path.join(split_dir, 'train.csv'))
+test = pd.read_csv(os.path.join(split_dir, 'test.csv'))
+
+raw_cat_cols = [c for c in train.columns
+                if (pd.api.types.is_object_dtype(train[c]) or pd.api.types.is_string_dtype(train[c]))
+                and c.startswith('feature_')]
+ORDINAL_RE = re.compile(r'^ord_(\d+)$')
+ordinal_cols = [c for c in raw_cat_cols if train[c].dropna().astype(str).str.match(ORDINAL_RE).all()]
+cat_cols = [c for c in raw_cat_cols if c not in ordinal_cols]
+num_cols = [c for c in train.columns if c not in cat_cols and c not in ['row_id', 'target']]
+
+y = train['target'].values
+X_train = train.drop(columns=['row_id', 'target']).copy()
+X_test = test.drop(columns=['row_id']).copy()
+test_row_ids = test['row_id'].copy()
+del train, test
+
+for col in ordinal_cols:
+    X_train[col] = X_train[col].str.extract(r'(\d+)$', expand=False).astype(float)
+    X_test[col] = X_test[col].str.extract(r'(\d+)$', expand=False).astype(float)
+
+for col in X_train.columns:
+    if pd.api.types.is_object_dtype(X_train[col]) or pd.api.types.is_string_dtype(X_train[col]):
+        X_train[col] = X_train[col].fillna('missing')
+        X_test[col] = X_test[col].fillna('missing')
+    else:
+        med = X_train[col].median()
+        X_train[col] = X_train[col].fillna(med)
+        X_test[col] = X_test[col].fillna(med)
+
+for col in num_cols:
+    if col in X_train.columns:
+        lower, upper = X_train[col].quantile([0.01, 0.99])
+        X_train[col] = X_train[col].clip(lower, upper)
+        X_test[col] = X_test[col].clip(lower, upper)
+
+cb_X_train = X_train.copy()
+cb_X_test = X_test.copy()
+
+te_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+global_mean = y.mean()
+for col in cat_cols:
+    oof_te = np.zeros(len(X_train))
+    for tr_idx, val_idx in te_cv.split(X_train, y):
+        fold_means = pd.Series(y[tr_idx]).groupby(X_train[col].iloc[tr_idx].values).mean()
+        oof_te[val_idx] = X_train[col].iloc[val_idx].map(fold_means).fillna(global_mean).values
+    X_train[col + '_te'] = oof_te
+    full_means = pd.Series(y).groupby(X_train[col].values).mean()
+    X_test[col + '_te'] = X_test[col].map(full_means).fillna(global_mean)
+
+X_train = X_train.drop(columns=cat_cols)
+X_test = X_test.drop(columns=cat_cols)
+
+if num_cols:
+    num_mi = mutual_info_classif(X_train[num_cols], y, random_state=42)
+    top_num_cols = pd.Series(num_mi, index=num_cols).nlargest(min(5, len(num_cols))).index.tolist()
+    for col1, col2 in itertools.combinations(top_num_cols, 2):
+        if col1 in X_train.columns and col2 in X_train.columns:
+            X_train[col1 + "_" + col2 + "_mul"] = (X_train[col1] * X_train[col2]).astype(float)
+            X_test[col1 + "_" + col2 + "_mul"] = (X_test[col1] * X_test[col2]).astype(float)
+
+n = len(y)
+adaptive = get_adaptive_params(n)
+n_folds = 5 if n < 5000 else 3
+cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+cat_feature_indices = [cb_X_train.columns.get_loc(c) for c in cat_cols] if cat_cols else []
+
+if experiment == 'no_cb':
+    models_to_train = ['et', 'xgb', 'lr']
+elif experiment == 'ensemble':
+    models_to_train = ['et', 'xgb', 'lr', 'cb']
+else:
+    models_to_train = [experiment]
+
+oof_cache = {}
+predictions = []
+model_ids = []
+
+for name in models_to_train:
+    try:
+        X_df = cb_X_train if name == 'cb' else X_train
+        model_oof = np.zeros(n)
+        scores = []
+        for tr_idx, val_idx in cv.split(X_df, y):
+            model = get_model(name)
+            model.fit(X_df.iloc[tr_idx], y[tr_idx])
+            pred = model.predict_proba(X_df.iloc[val_idx])[:, 1]
+            model_oof[val_idx] = pred
+            scores.append(roc_auc_score(y[val_idx], pred))
+            del model
+            gc.collect()
+        oof_cache[name] = model_oof
+        cv_score = np.mean(scores)
+        print("  " + name + ": CV=" + str(round(cv_score, 4)))
+
+        model = get_model(name)
+        model.fit(X_df, y)
+        Xt_df = cb_X_test if name == 'cb' else X_test
+        pred = model.predict_proba(Xt_df)[:, 1]
+        predictions.append(pred)
+        model_ids.append(name)
+        del model
+        gc.collect()
+    except Exception as e:
+        print("  " + name + ": Failed - " + str(e))
+
+if len(predictions) >= 2:
+    names = model_ids
+    oof_matrix = np.column_stack([oof_cache[n] for n in names])
+    weights, _ = nnls(oof_matrix, y.astype(float))
+    if weights.sum() > 0:
+        weights = weights / weights.sum()
+    else:
+        weights = np.ones(len(weights)) / len(weights)
+    oof_aucs = [roc_auc_score(y, oof_matrix[:, i]) for i in range(len(names))]
+    sorted_idx = np.argsort(-np.array(oof_aucs))
+    if len(sorted_idx) >= 2 and (oof_aucs[sorted_idx[0]] - oof_aucs[sorted_idx[1]]) < 0.005:
+        for idx in sorted_idx[:2]:
+            if weights[idx] < 0.10:
+                weights[idx] = 0.10
+        weights = weights / weights.sum()
+    oof_blend_auc = roc_auc_score(y, oof_matrix @ weights)
+    print("  OOF-weighted blend: " + str(dict(zip(names, weights.round(3)))) + ", OOF AUC=" + str(round(oof_blend_auc, 4)))
+    final_pred = np.column_stack(predictions) @ weights
+else:
+    final_pred = predictions[0]
+    print("  Single model: " + model_ids[0])
+
+result = {
+    'row_ids': test_row_ids.tolist(),
+    'preds': final_pred.tolist(),
+}
+print('RESULT_JSON_START' + json.dumps(result) + 'RESULT_JSON_END')
+sys.stdout.flush()
+'''
+
+
+# --- Sklearn-only runner (fallback for segfaulted splits) ---
+# Does NOT import CatBoost or XGBoost — only sklearn + scipy.
+SKLEARN_ONLY_CODE = r'''import sys, os, json, warnings, gc
+warnings.filterwarnings("ignore")
+import pandas as pd
+import numpy as np
+import itertools, re
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import roc_auc_score
+from sklearn.feature_selection import mutual_info_classif
+from scipy.optimize import nnls
+
+split_dir = sys.argv[1]
+experiment = sys.argv[2]
+
+train = pd.read_csv(os.path.join(split_dir, 'train.csv'))
+test = pd.read_csv(os.path.join(split_dir, 'test.csv'))
+
+raw_cat_cols = [c for c in train.columns
+                if (pd.api.types.is_object_dtype(train[c]) or pd.api.types.is_string_dtype(train[c]))
+                and c.startswith('feature_')]
+ORDINAL_RE = re.compile(r'^ord_(\d+)$')
+ordinal_cols = [c for c in raw_cat_cols if train[c].dropna().astype(str).str.match(ORDINAL_RE).all()]
+cat_cols = [c for c in raw_cat_cols if c not in ordinal_cols]
+num_cols = [c for c in train.columns if c not in cat_cols and c not in ['row_id', 'target']]
+
+y = train['target'].values
+X_train = train.drop(columns=['row_id', 'target']).copy()
+X_test = test.drop(columns=['row_id']).copy()
+test_row_ids = test['row_id'].copy()
+del train, test
+
+for col in ordinal_cols:
+    X_train[col] = X_train[col].str.extract(r'(\d+)$', expand=False).astype(float)
+    X_test[col] = X_test[col].str.extract(r'(\d+)$', expand=False).astype(float)
+
+for col in X_train.columns:
+    if pd.api.types.is_object_dtype(X_train[col]) or pd.api.types.is_string_dtype(X_train[col]):
+        X_train[col] = X_train[col].fillna('missing')
+        X_test[col] = X_test[col].fillna('missing')
+    else:
+        med = X_train[col].median()
+        X_train[col] = X_train[col].fillna(med)
+        X_test[col] = X_test[col].fillna(med)
+
+for col in num_cols:
+    if col in X_train.columns:
+        lower, upper = X_train[col].quantile([0.01, 0.99])
+        X_train[col] = X_train[col].clip(lower, upper)
+        X_test[col] = X_test[col].clip(lower, upper)
+
+te_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+global_mean = y.mean()
+for col in cat_cols:
+    oof_te = np.zeros(len(X_train))
+    for tr_idx, val_idx in te_cv.split(X_train, y):
+        fold_means = pd.Series(y[tr_idx]).groupby(X_train[col].iloc[tr_idx].values).mean()
+        oof_te[val_idx] = X_train[col].iloc[val_idx].map(fold_means).fillna(global_mean).values
+    X_train[col + '_te'] = oof_te
+    full_means = pd.Series(y).groupby(X_train[col].values).mean()
+    X_test[col + '_te'] = X_test[col].map(full_means).fillna(global_mean)
+
+X_train = X_train.drop(columns=cat_cols)
+X_test = X_test.drop(columns=cat_cols)
+
+if num_cols:
+    num_mi = mutual_info_classif(X_train[num_cols], y, random_state=42)
+    top_num_cols = pd.Series(num_mi, index=num_cols).nlargest(min(5, len(num_cols))).index.tolist()
+    for col1, col2 in itertools.combinations(top_num_cols, 2):
+        if col1 in X_train.columns and col2 in X_train.columns:
+            X_train[col1 + "_" + col2 + "_mul"] = (X_train[col1] * X_train[col2]).astype(float)
+            X_test[col1 + "_" + col2 + "_mul"] = (X_test[col1] * X_test[col2]).astype(float)
+
+n = len(y)
+if n < 2000:
+    et_n_est, et_depth = 200, 6
+elif n < 10000:
+    et_n_est, et_depth = 300, 8
+else:
+    et_n_est, et_depth = 200, 6
+
+n_folds = 5 if n < 5000 else 3
+cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+def get_model(name):
+    if name == 'et':
+        return ExtraTreesClassifier(n_estimators=int(et_n_est), max_depth=int(et_depth),
+                                    random_state=42, n_jobs=2)
+    if name == 'lr':
+        return make_pipeline(StandardScaler(),
+                             LogisticRegression(max_iter=5000, C=0.1, random_state=42))
+
+models_to_train = ['et', 'lr']
+oof_cache = {}
+predictions = []
+model_ids = []
+
+for name in models_to_train:
+    try:
+        model_oof = np.zeros(n)
+        scores = []
+        for tr_idx, val_idx in cv.split(X_train, y):
+            model = get_model(name)
+            model.fit(X_train.iloc[tr_idx], y[tr_idx])
+            pred = model.predict_proba(X_train.iloc[val_idx])[:, 1]
+            model_oof[val_idx] = pred
+            scores.append(roc_auc_score(y[val_idx], pred))
+            del model
+            gc.collect()
+        oof_cache[name] = model_oof
+        cv_score = np.mean(scores)
+        print("  " + name + ": CV=" + str(round(cv_score, 4)))
+
+        model = get_model(name)
+        model.fit(X_train, y)
+        pred = model.predict_proba(X_test)[:, 1]
+        predictions.append(pred)
+        model_ids.append(name)
+        del model
+        gc.collect()
+    except Exception as e:
+        print("  " + name + ": Failed - " + str(e))
+
+if len(predictions) >= 2:
+    names = model_ids
+    oof_matrix = np.column_stack([oof_cache[n] for n in names])
+    weights, _ = nnls(oof_matrix, y.astype(float))
+    if weights.sum() > 0:
+        weights = weights / weights.sum()
+    else:
+        weights = np.ones(len(weights)) / len(weights)
+    oof_aucs = [roc_auc_score(y, oof_matrix[:, i]) for i in range(len(names))]
+    sorted_idx = np.argsort(-np.array(oof_aucs))
+    if len(sorted_idx) >= 2 and (oof_aucs[sorted_idx[0]] - oof_aucs[sorted_idx[1]]) < 0.005:
+        for idx in sorted_idx[:2]:
+            if weights[idx] < 0.10:
+                weights[idx] = 0.10
+        weights = weights / weights.sum()
+    oof_blend_auc = roc_auc_score(y, oof_matrix @ weights)
+    print("  OOF blend: " + str(dict(zip(names, weights.round(3)))) + ", OOF AUC=" + str(round(oof_blend_auc, 4)))
+    final_pred = np.column_stack(predictions) @ weights
+else:
+    final_pred = predictions[0]
+    print("  Single model: " + model_ids[0])
+
+result = {
+    'row_ids': test_row_ids.tolist(),
+    'preds': final_pred.tolist(),
+}
+print('RESULT_JSON_START' + json.dumps(result) + 'RESULT_JSON_END')
+sys.stdout.flush()
+'''
+
+
+def process_split_subprocess(split_dir, experiment):
+    """Process one split in a subprocess with fallback chain.
+
+    Tries in order:
+    1. Full ensemble (ET+XGB+LR+CB) via RUNNER_CODE
+    2. Sklearn-only (ET+LR) via SKLEARN_ONLY_CODE if subprocess segfaults
+
+    Returns (row_ids, preds) or (None, None) if all tiers fail.
+    """
+    # Tier 1: Full ensemble
+    result = _write_and_run(RUNNER_CODE, split_dir, experiment, 'full')
+    if result is not None:
+        return result
+
+    # Tier 2: Sklearn-only fallback (no CatBoost, no XGBoost imports)
+    print(f"  Retrying with sklearn-only fallback...", flush=True)
+    result = _write_and_run(SKLEARN_ONLY_CODE, split_dir, 'sklearn', 'sklearn')
+    if result is not None:
+        print(f"  sklearn-only fallback succeeded!", flush=True)
+        return result
+
+    print(f"  All fallback tiers failed for {split_dir}", flush=True)
+    return None, None
+
+
+def train_and_predict(train_df, test_df, experiment='ensemble'):
+    """Train the ensemble on one split's data. (Inline fallback, not used in subprocess mode.)"""
+    raw_cat_cols = [c for c in train_df.columns
+                    if (pd.api.types.is_object_dtype(train_df[c]) or pd.api.types.is_string_dtype(train_df[c]))
+                    and c.startswith('feature_')]
+
+    ORDINAL_RE = re.compile(r'^ord_(\d+)$')
+    ordinal_cols = [c for c in raw_cat_cols
+                    if train_df[c].dropna().astype(str).str.match(ORDINAL_RE).all()]
+    cat_cols = [c for c in raw_cat_cols if c not in ordinal_cols]
+    num_cols = [c for c in train_df.columns if c not in cat_cols and c not in ['row_id', 'target']]
+
+    y = train_df['target'].values
+    X_train = train_df.drop(columns=['row_id', 'target']).copy()
+    X_test = test_df.drop(columns=['row_id']).copy()
+    test_row_ids = test_df['row_id'].copy()
+
+    del train_df, test_df
+
+    for col in ordinal_cols:
+        X_train[col] = X_train[col].str.extract(r'(\d+)$', expand=False).astype(float)
+        X_test[col] = X_test[col].str.extract(r'(\d+)$', expand=False).astype(float)
+
+    for col in X_train.columns:
+        if pd.api.types.is_object_dtype(X_train[col]) or pd.api.types.is_string_dtype(X_train[col]):
+            X_train[col] = X_train[col].fillna('missing')
+            X_test[col] = X_test[col].fillna('missing')
+        else:
+            med = X_train[col].median()
+            X_train[col] = X_train[col].fillna(med)
+            X_test[col] = X_test[col].fillna(med)
+
+    for col in num_cols:
+        if col in X_train.columns:
+            lower, upper = X_train[col].quantile([0.01, 0.99])
+            X_train[col] = X_train[col].clip(lower, upper)
+            X_test[col] = X_test[col].clip(lower, upper)
+
+    cb_X_train = X_train.copy()
+    cb_X_test = X_test.copy()
+
+    te_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    global_mean = y.mean()
+    for col in cat_cols:
+        oof_te = np.zeros(len(X_train))
+        for tr_idx, val_idx in te_cv.split(X_train, y):
+            fold_means = pd.Series(y[tr_idx]).groupby(X_train[col].iloc[tr_idx].values).mean()
+            oof_te[val_idx] = X_train[col].iloc[val_idx].map(fold_means).fillna(global_mean).values
+        X_train[col + '_te'] = oof_te
+        full_means = pd.Series(y).groupby(X_train[col].values).mean()
+        X_test[col + '_te'] = X_test[col].map(full_means).fillna(global_mean)
+
+    X_train = X_train.drop(columns=cat_cols)
+    X_test = X_test.drop(columns=cat_cols)
+
+    if num_cols:
+        num_mi = mutual_info_classif(X_train[num_cols], y, random_state=42)
+        top_num_cols = pd.Series(num_mi, index=num_cols).nlargest(min(5, len(num_cols))).index.tolist()
+        for col1, col2 in itertools.combinations(top_num_cols, 2):
+            if col1 in X_train.columns and col2 in X_train.columns:
+                X_train[f"{col1}_{col2}_mul"] = (X_train[col1] * X_train[col2]).astype(float)
+                X_test[f"{col1}_{col2}_mul"] = (X_test[col1] * X_test[col2]).astype(float)
+
+    n_samples = len(y)
+    adaptive = get_adaptive_params(n_samples)
+    n_folds = 5 if n_samples < 5000 else 3
+    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    cat_feature_indices = [cb_X_train.columns.get_loc(c) for c in cat_cols] if cat_cols else []
+
+    def get_model(name):
+        if name == 'et':
+            return ExtraTreesClassifier(n_estimators=int(adaptive['et_n_est']), max_depth=int(adaptive['et_depth']),
+                                        random_state=42, n_jobs=2)
+        if name == 'xgb':
+            return EarlyStoppingXGB(n_estimators=int(adaptive['xgb_n_est']), max_depth=int(adaptive['xgb_depth']),
+                                    learning_rate=adaptive['xgb_lr'], random_state=42, n_jobs=2, verbosity=0)
+        if name == 'lr':
+            return make_pipeline(StandardScaler(),
+                                 LogisticRegression(max_iter=5000, C=0.1, random_state=42))
+        if name == 'cb':
+            cb_seeds = (42, 142, 242, 342, 442)[:adaptive['n_seeds']]
+            return SeedAveragedCatBoost(cat_features=cat_feature_indices, seeds=cb_seeds,
+                                       iterations=int(adaptive['cb_iterations']), depth=int(adaptive['cb_depth']),
+                                       learning_rate=adaptive['cb_lr'],
+                                       thread_count=2, allow_writing_files=False, save_snapshot=False)
+
+    def get_cv_and_oof(name, X_df):
+        model_oof = np.zeros(n_samples)
+        scores = []
+        for tr_idx, val_idx in cv.split(X_df, y):
+            model = get_model(name)
+            model.fit(X_df.iloc[tr_idx], y[tr_idx])
+            pred = model.predict_proba(X_df.iloc[val_idx])[:, 1]
+            model_oof[val_idx] = pred
+            scores.append(roc_auc_score(y[val_idx], pred))
+            del model
+            gc.collect()
+        return np.mean(scores), model_oof
+
+    models_to_train = []
+    if experiment == 'ensemble':
+        models_to_train = ['et', 'xgb', 'lr', 'cb']
+    elif experiment == 'no_cb':
+        models_to_train = ['et', 'xgb', 'lr']
+    elif experiment == 'no_xgb':
+        models_to_train = ['et', 'cb']
+
+    oof_cache = {}
+    predictions = []
+    model_ids = []
+
+    for name in models_to_train:
+        try:
+            X_df = cb_X_train if name == 'cb' else X_train
+            cv_score, oof = get_cv_and_oof(name, X_df)
+            oof_cache[name] = oof
+            print(f"  {name}: CV={cv_score:.4f}")
+
+            model = get_model(name)
+            model.fit(X_df, y)
+            Xt_df = cb_X_test if name == 'cb' else X_test
+            pred = model.predict_proba(Xt_df)[:, 1]
+            predictions.append(pred)
+            model_ids.append(name)
+            del model
+            gc.collect()
+        except Exception as e:
+            print(f"  {name}: Failed - {e}")
+            continue
+
+    if len(predictions) >= 2:
+        names = model_ids
+        oof_matrix = np.column_stack([oof_cache[n] for n in names])
+        from scipy.optimize import nnls
+        weights, _ = nnls(oof_matrix, y.astype(float))
+        if weights.sum() > 0:
+            weights = weights / weights.sum()
+        else:
+            weights = np.ones(len(weights)) / len(weights)
+        final_pred = np.column_stack(predictions) @ weights
+        print(f"  Saved predictions ({len(final_pred)} rows)")
+        return test_row_ids, final_pred
+    else:
+        print(f"  Single model: {model_ids[0]}")
+        return test_row_ids, predictions[0]
 
 
 def main():
@@ -368,35 +762,15 @@ def main():
     for i, split_dir in enumerate(data_dirs):
         print(f"\n[{i+1}/{len(data_dirs)}] Processing {split_dir}...", flush=True)
 
-        # Try full ensemble first
-        result = process_split(split_dir, experiment)
-        if result is not None:
-            row_ids, preds = result
-            all_row_ids.extend(row_ids)
-            all_preds.extend(preds)
-            print(f"  OK ({len(preds)} rows)", flush=True)
-        else:
-            # Fallback 1: no_catboost (ET+XGB+LR)
-            print(f"  Trying no_cb fallback...", flush=True)
-            result = process_split(split_dir, 'no_cb')
-            if result is not None:
-                row_ids, preds = result
-                all_row_ids.extend(row_ids)
-                all_preds.extend(preds)
-                print(f"  no_cb fallback OK ({len(preds)} rows)", flush=True)
-            else:
-                # Fallback 2: no_xgboost (ET+CB)
-                print(f"  Trying no_xgb fallback...", flush=True)
-                result = process_split(split_dir, 'no_xgb')
-                if result is not None:
-                    row_ids, preds = result
-                    all_row_ids.extend(row_ids)
-                    all_preds.extend(preds)
-                    print(f"  no_xgb fallback OK ({len(preds)} rows)", flush=True)
-                else:
-                    print(f"  FAILED for {split_dir}", flush=True)
+        row_ids, preds = process_split_subprocess(split_dir, experiment)
+        if row_ids is None:
+            print(f"  FAILED for {split_dir}", flush=True)
+            continue
 
-        del result
+        all_row_ids.extend(row_ids)
+        all_preds.extend(preds)
+        print(f"  OK ({len(preds)} rows)", flush=True)
+        del row_ids, preds
         gc.collect()
 
     print(f"\nCombined submission: {len(all_row_ids)} rows")
