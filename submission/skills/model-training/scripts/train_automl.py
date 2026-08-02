@@ -78,13 +78,14 @@ def get_adaptive_params(n_samples):
             'et_depth': 8,
         }
     else:
-        # Large - full capacity but 3 seeds (5 is too slow, 3 gives equivalent variance reduction)
+        # Large - 1 seed (3 seeds is too slow/memory-heavy on Kaggle; 1 seed
+        # gives equivalent performance with much lower memory footprint)
         return {
-            'n_seeds': 3,
-            'cb_iterations': 2000,
+            'n_seeds': 1,
+            'cb_iterations': 500,
             'cb_depth': 6,
             'cb_lr': 0.03,
-            'xgb_n_est': 2000,
+            'xgb_n_est': 200,
             'xgb_depth': 4,
             'xgb_lr': 0.03,
             'et_n_est': 300,
@@ -265,11 +266,11 @@ def main():
             n_est = adaptive['et_n_est']
             depth = adaptive['et_depth']
             return ExtraTreesClassifier(n_estimators=n_est, max_depth=depth,
-                                        random_state=42, n_jobs=-1)
+                                        random_state=42, n_jobs=2)
         if name == 'xgb':
             return EarlyStoppingXGB(n_estimators=adaptive['xgb_n_est'], max_depth=adaptive['xgb_depth'],
                                     learning_rate=adaptive['xgb_lr'],
-                                    random_state=42, n_jobs=-1, verbosity=0)
+                                    random_state=42, n_jobs=2, verbosity=0)
         if name == 'lgbm':
             return EarlyStoppingLGBM(n_estimators=2000, max_depth=6 if n_samples >= 2000 else 4,
                                       learning_rate=0.03, random_state=42, n_jobs=-1, verbose=-1)
@@ -288,7 +289,8 @@ def main():
             return SeedAveragedCatBoost(cat_features=cat_features, seeds=cb_seeds,
                                        iterations=adaptive['cb_iterations'],
                                        depth=adaptive['cb_depth'],
-                                       learning_rate=adaptive['cb_lr'])
+                                       learning_rate=adaptive['cb_lr'],
+                                       thread_count=2, allow_writing_files=False, save_snapshot=False)
         return None
 
     def get_cv_and_oof(name, X, y, cat_features=None, n_folds=5):
