@@ -28,12 +28,12 @@ NNLS weights (with a conditional soft floor when top-2 OOF models are within 0.0
 
 ## Ensemble Notes
 The default `ensemble` mode trains four genuinely different model families:
-- **CatBoost** (native categorical handling, seed-averaged over 3 seeds; adaptive depth/iterations by dataset size)
-- **ExtraTrees** (bagging, adaptive n_estimators/max_depth)
-- **XGBoost** (boosted trees with early stopping, adaptive n_estimators/depth)
+- **CatBoost** (native categorical handling, seed-averaged over 1 seed for large datasets; adaptive depth/iterations by dataset size)
+- **ExtraTrees** (bagging, adaptive n_estimators/max_depth, n_jobs=2)
+- **XGBoost** (boosted trees with early stopping, adaptive n_estimators/depth, n_jobs=2)
 - **LogisticRegression** (linear baseline with StandardScaler, C=0.1 — strong on weak-signal data)
 
-Model complexity adapts to dataset size via `get_adaptive_params()`: tiny datasets (<500 rows) use 1 CB seed with shallow trees; large datasets (>=10k rows) use 3 CB seeds with full depth.
+Model complexity adapts to dataset size via `get_adaptive_params()`: tiny datasets (<500 rows) use 1 CB seed with shallow trees; large datasets (>=10k rows) use 1 CB seed with 500 iterations (reduced from 2000 for memory stability on Kaggle).
 
 These are blended using non-negative least squares (NNLS) optimized on out-of-fold (OOF) predictions. OOF predictions are cached from the CV pass, avoiding double-training. A conditional soft floor ensures both top-2 models get at least 10% weight when their OOF AUCs are within 0.01 AUC of each other — this hedges against OOF-vs-test noise where NNLS might over-zero a marginally-inferior model that's actually better on test data.
 
