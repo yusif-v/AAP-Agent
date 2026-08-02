@@ -775,8 +775,8 @@ def main():
 
     print(f"\nCombined submission: {len(all_row_ids)} rows")
     submission = pd.DataFrame({'row_id': all_row_ids, 'target': all_preds})
-    submission.to_csv('final_submission.csv', index=False)
-    print(f"Saved final_submission.csv ({len(submission)} rows)")
+    submission.to_csv('submission.csv', index=False)
+    print(f"Saved submission.csv ({len(submission)} rows)")
 
 
 if __name__ == '__main__':
