@@ -15,6 +15,10 @@ wheels/
 # Credentials
 .env
 .env.local
+.env.example
+
+# CatBoost generated files
+catboost_info/
 
 # Models
 *.h5
